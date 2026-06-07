@@ -1,6 +1,11 @@
+
+
 # sam3-yolo-pipeline
 
 YouTube URL 또는 웹캠을 소스로 받아 **SAM3 오토라벨링 → YOLO 학습 → 추론**까지 이어지는 end-to-end 파이프라인 WebUI.
+
+<img width="860" height="530" alt="ezgif com-resize (1)" src="https://github.com/user-attachments/assets/985707be-ce2e-4560-8b88-29e06871db5b" />
+
 
 ## 파이프라인 개요
 
