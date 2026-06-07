@@ -2,8 +2,6 @@
 
 YouTube URL 또는 웹캠을 소스로 받아 **SAM3 오토라벨링 → YOLO 학습 → 추론**까지 이어지는 end-to-end 파이프라인 WebUI.
 
-<video src="demos/demo.mp4" controls width="100%"></video>
-
 ## 파이프라인 개요
 
 ```
@@ -20,13 +18,13 @@ YouTube URL 또는 웹캠을 소스로 받아 **SAM3 오토라벨링 → YOLO �
 
 ## 기술 스택
 
-| 역할 | 라이브러리 |
-|------|-----------|
-| UI | `gradio` |
-| YouTube 스트림 | `yt-dlp` |
-| 영상 처리 | `opencv-python` |
+| 역할            | 라이브러리                              |
+| --------------- | --------------------------------------- |
+| UI              | `gradio`                                |
+| YouTube 스트림  | `yt-dlp`                                |
+| 영상 처리       | `opencv-python`                         |
 | SAM3 오토라벨링 | `ultralytics` — `SAM3SemanticPredictor` |
-| YOLO 학습/추론 | `ultralytics` — `YOLO("yolo26n.pt")` |
+| YOLO 학습/추론  | `ultralytics` — `YOLO("yolo26n.pt")`    |
 
 ## 파일 구조
 
@@ -78,42 +76,47 @@ python app.py
 ## 단계별 사용법
 
 ### Tab 1 — 프레임 추출
+
 - YouTube URL 또는 웹캠을 소스로 선택
 - 캡처 FPS 설정 후 추출 시작 (목표 500장)
 - 중지 버튼으로 언제든 중단 가능
 - 저장 경로: `dataset/raw_frames/`
 
 ### Tab 2 — SAM3 오토라벨링
+
 - 텍스트 프롬프트 입력 (예: `person, car, bicycle`)
 - 마스크 → YOLO bbox 자동 변환 후 저장
 - 라벨링 중 마스크 오버레이 프리뷰 실시간 표시
 
 ### Tab 3 — 데이터셋 검토 & 구성
+
 - bbox 오버레이 갤러리로 라벨 품질 확인
 - "라벨 없는 프레임 제외" 옵션으로 불량 데이터 필터링
 - train/val 비율 설정 후 데이터셋 구성
 - `dataset/dataset.yaml` 자동 생성
 
 ### Tab 4 — YOLO 학습
+
 - epochs, imgsz, batch, lr0 등 하이퍼파라미터 조정
 - 학습 로그 실시간 스트리밍
 - 에폭 단위 중지 버튼 지원
 - 결과: `runs/detect/train/weights/best.pt`
 
 ### Tab 5 — 추론
+
 - YouTube URL 또는 웹캠으로 실시간 추론
 - 모델 경로 미입력 시 최신 `best.pt` 자동 탐색
 - N프레임마다 1회 추론으로 성능 최적화
 
 ## 학습 하이퍼파라미터 가이드
 
-| 파라미터 | 기본값 | 조정 기준 |
-|---------|--------|----------|
-| epochs | 50 | 500장 기준 50~100 적당 |
-| imgsz | 640 | 객체 작으면 416~480 고려 |
-| batch | 16 | VRAM 8GB 이하면 8로 낮추기 |
-| lr0 | 0.01 | loss 불안정 시 0.001~0.005 |
-| device | auto | GPU 자동 감지 |
+| 파라미터 | 기본값 | 조정 기준                  |
+| -------- | ------ | -------------------------- |
+| epochs   | 50     | 500장 기준 50~100 적당     |
+| imgsz    | 640    | 객체 작으면 416~480 고려   |
+| batch    | 16     | VRAM 8GB 이하면 8로 낮추기 |
+| lr0      | 0.01   | loss 불안정 시 0.001~0.005 |
+| device   | auto   | GPU 자동 감지              |
 
 ## 샘플 노트북
 
