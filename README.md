@@ -2,6 +2,8 @@
 
 YouTube URL 또는 웹캠을 소스로 받아 **SAM3 오토라벨링 → YOLO 학습 → 추론**까지 이어지는 end-to-end 파이프라인 WebUI.
 
+<video src="demos/demo.mp4" controls width="100%"></video>
+
 ## 파이프라인 개요
 
 ```
