@@ -28,7 +28,6 @@ models/
 
 # Jupyter
 .ipynb_checkpoints/
-*.ipynb
 
 # 환경설정
 .env
