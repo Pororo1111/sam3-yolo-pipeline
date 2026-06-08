@@ -10,7 +10,7 @@ def run_label(prompts_str, conf):
     yield from labeler.label(prompts_str, float(conf))
 
 
-with gr.Blocks(title="YOLO 파이프라인") as demo:
+with gr.Blocks(title="YOLO 파이프라인", theme=gr.themes.Default()) as demo:
 
     # ── Tab 1: 프레임 추출 ──────────────────────────────────────
     with gr.Tab("1. 프레임 추출"):
