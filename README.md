@@ -42,6 +42,9 @@ yolo-webui/
 │   ├── dataset.py          ← Tab 3: 데이터셋 검토/구성
 │   ├── trainer.py          ← Tab 4: YOLO 학습
 │   └── inference.py        ← Tab 5: 추론
+├── models/                 ← 사전학습 모델 파일 보관
+│   ├── sam3.pt             ← SAM3 세그멘테이션 모델
+│   └── yolo26n.pt          ← YOLO 베이스 모델
 ├── dataset/                ← (gitignore) 추출 프레임 & 라벨
 ├── runs/                   ← (gitignore) 학습 결과 모델
 └── samples/                ← 참고용 Jupyter 노트북
