@@ -106,12 +106,14 @@ def train(epochs: int, imgsz: int, batch: int, lr0: float, device: str):
     model.add_callback("on_train_end",       on_train_end)
     model.add_callback("on_val_end",         on_val_end)
 
-    yield (
+    header = (
         f"학습 시작\n"
         f"  epochs={epochs}  imgsz={imgsz}  batch={batch}  lr0={lr0}  device={device}\n"
         f"  data={YAML_PATH}\n"
         + "─" * 60 + "\n"
     )
+    accumulated = header
+    yield accumulated
 
     result_box = [None]
     exc_box    = [None]
@@ -140,39 +142,38 @@ def train(epochs: int, imgsz: int, batch: int, lr0: float, device: str):
     t.start()
 
     sent = 0
-    tick = 0
     while not done_event.is_set():
         if _stop_event.is_set():
             break
         time.sleep(0.5)
         new = lines[sent:]
         if new:
-            yield "\n".join(new) + "\n"
+            accumulated += "\n".join(new) + "\n"
+            yield accumulated
             sent += len(new)
-            tick = 0
-        else:
-            tick += 1
-            if tick % 20 == 0:  # 10초마다 heartbeat
-                yield "."
 
     new = lines[sent:]
     if new:
-        yield "\n".join(new) + "\n"
+        accumulated += "\n".join(new) + "\n"
+        yield accumulated
 
     if exc_box[0] is not None:
-        yield f"\n오류 발생: {exc_box[0]}\n"
+        accumulated += f"\n오류 발생: {exc_box[0]}\n"
+        yield accumulated
         return
 
     if _stop_event.is_set():
-        yield "\n학습 중지됨.\n"
+        accumulated += "\n학습 중지됨.\n"
+        yield accumulated
         return
 
     best = _ROOT / "runs/detect/train/weights/best.pt"
     if best.exists():
-        yield f"\n학습 완료!\nbest.pt → {best.resolve()}\n"
+        accumulated += f"\n학습 완료!\nbest.pt → {best.resolve()}\n"
     else:
         candidates = sorted((_ROOT / "runs/detect").glob("*/weights/best.pt"))
         if candidates:
-            yield f"\n학습 완료!\nbest.pt → {candidates[-1].resolve()}\n"
+            accumulated += f"\n학습 완료!\nbest.pt → {candidates[-1].resolve()}\n"
         else:
-            yield "\n학습 완료 (best.pt 경로를 찾지 못했습니다 — runs/detect/ 확인).\n"
+            accumulated += "\n학습 완료 (best.pt 경로를 찾지 못했습니다 — runs/detect/ 확인).\n"
+    yield accumulated

@@ -1,3 +1,5 @@
+import html as _html
+
 import gradio as gr
 from pipeline import extractor, labeler, dataset, trainer, inference
 
@@ -8,6 +10,23 @@ def run_capture(source_type, youtube_url, capture_fps):
 
 def run_label(prompts_str, conf):
     yield from labeler.label(prompts_str, float(conf))
+
+
+_WRAP_STYLE = (
+    "height:420px;overflow-y:scroll;display:flex;flex-direction:column-reverse;"
+    "background:#1e1e1e;border-radius:6px;"
+)
+_PRE_STYLE = (
+    "margin:0;padding:10px 14px;color:#d4d4d4;"
+    "font-family:'Consolas','Courier New',monospace;font-size:12px;"
+    "white-space:pre-wrap;word-break:break-all;"
+)
+
+
+def run_train(epochs, imgsz, batch, lr0, device):
+    for text in trainer.train(epochs, imgsz, batch, lr0, device):
+        escaped = _html.escape(text)
+        yield f'<div style="{_WRAP_STYLE}"><pre style="{_PRE_STYLE}">{escaped}</pre></div>'
 
 
 with gr.Blocks(title="YOLO 파이프라인", theme=gr.themes.Default()) as demo:
@@ -179,16 +198,10 @@ with gr.Blocks(title="YOLO 파이프라인", theme=gr.themes.Default()) as demo:
             train_start_btn = gr.Button("학습 시작", variant="primary")
             train_stop_btn  = gr.Button("중지", variant="stop")
 
-        train_log = gr.Textbox(
-            label="학습 로그",
-            interactive=False,
-            lines=20,
-            max_lines=20,
-            autoscroll=True,
-        )
+        train_log = gr.HTML(label="학습 로그")
 
         train_event = train_start_btn.click(
-            fn=trainer.train,
+            fn=run_train,
             inputs=[epochs_slider, imgsz_slider, batch_slider, lr0_slider, device_radio],
             outputs=train_log,
         )
