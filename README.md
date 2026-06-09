@@ -2,7 +2,7 @@
 
 # sam3-yolo-pipeline
 
-YouTube URL 또는 웹캠을 소스로 받아 **SAM3 오토라벨링 → YOLO 학습 → 추론**까지 이어지는 end-to-end 파이프라인 WebUI.
+YouTube URL 또는 웹캠을 소스로 받아 **SAM3 오토라벨링 → YOLO 학습 → 추론 → 로컬 LLM 영역 설정 & 침입 감지**까지 이어지는 end-to-end 파이프라인 WebUI.
 
 <img width="860" height="530" alt="ezgif com-resize (1)" src="https://github.com/user-attachments/assets/985707be-ce2e-4560-8b88-29e06871db5b" />
 
@@ -19,6 +19,8 @@ YouTube URL 또는 웹캠을 소스로 받아 **SAM3 오토라벨링 → YOLO �
 [Tab 4] YOLO 학습
     ↓
 [Tab 5] 추론
+    ↓
+[Tab 6] 침입 감지 (로컬 LLM 영역 설정 + YOLO 실시간 감시)
 ```
 
 ## 기술 스택
@@ -30,6 +32,7 @@ YouTube URL 또는 웹캠을 소스로 받아 **SAM3 오토라벨링 → YOLO �
 | 영상 처리       | `opencv-python`                         |
 | SAM3 오토라벨링 | `ultralytics` — `SAM3SemanticPredictor` |
 | YOLO 학습/추론  | `ultralytics` — `YOLO("yolo26n.pt")`    |
+| 로컬 LLM (VLM)  | Ollama — `gemma4:e4b` (영역 설정)       |
 
 ## 파일 구조
 
@@ -41,7 +44,8 @@ yolo-webui/
 │   ├── labeler.py          ← Tab 2: SAM3 오토라벨링
 │   ├── dataset.py          ← Tab 3: 데이터셋 검토/구성
 │   ├── trainer.py          ← Tab 4: YOLO 학습
-│   └── inference.py        ← Tab 5: 추론
+│   ├── inference.py        ← Tab 5: 추론
+│   └── zone_monitor.py     ← Tab 6: 침입 감지
 ├── models/                 ← 사전학습 모델 파일 보관
 │   ├── sam3.pt             ← SAM3 세그멘테이션 모델
 │   └── yolo26n.pt          ← YOLO 베이스 모델
@@ -115,6 +119,17 @@ python app.py
 - YouTube URL 또는 웹캠으로 실시간 추론
 - 모델 경로 미입력 시 최신 `best.pt` 자동 탐색
 - N프레임마다 1회 추론으로 성능 최적화
+
+### Tab 6 — 침입 감지
+
+- YouTube URL 또는 웹캠으로 실시간 스트리밍
+- 감시 영역을 자연어(한국어 가능)로 입력 → 로컬 LLM(`gemma4:e4b`)이 현재 프레임을 분석해 영역 좌표 자동 설정
+- LLM 응답 JSON을 로그 창에 표시
+- YOLO로 실시간 객체 탐지 후 zone 내 침입 여부 판별
+  - 객체 없음: 초록 테두리
+  - 객체 있음: 빨강 테두리 + 반투명 채우기, 내부 객체 수 표시
+- 중지 버튼으로 스트림 & 영역 설정 전체 초기화
+- Ollama가 `localhost:11434`에서 실행 중이어야 함
 
 ## 학습 하이퍼파라미터 가이드
 

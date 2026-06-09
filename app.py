@@ -1,7 +1,7 @@
 import html as _html
 
 import gradio as gr
-from pipeline import extractor, labeler, dataset, trainer, inference
+from pipeline import extractor, labeler, dataset, trainer, inference, zone_monitor
 
 
 def run_capture(source_type, youtube_url, capture_fps):
@@ -220,7 +220,7 @@ with gr.Blocks(title="YOLO 파이프라인", theme=gr.themes.Default()) as demo:
         )
         with gr.Row():
             inf_conf = gr.Slider(
-                minimum=0.05, maximum=0.95, value=0.25, step=0.05,
+                minimum=0.05, maximum=0.95, value=0.15, step=0.05,
                 label="신뢰도 임계값 (conf)",
             )
             inf_skip = gr.Slider(
@@ -263,6 +263,88 @@ with gr.Blocks(title="YOLO 파이프라인", theme=gr.themes.Default()) as demo:
         inf_stop_btn.click(
             fn=inference.stop,
             cancels=[inf_event],
+        )
+
+
+    # ── Tab 6: 침입 감지 ────────────────────────────────────────
+    with gr.Tab("6. 침입 감지"):
+        gr.Markdown("### 로컬 LLM 영역 설정 & 실시간 침입 감지")
+
+        zm_model_path = gr.Textbox(
+            placeholder="비워두면 runs/detect/ 에서 최신 best.pt 자동 탐색",
+            label="YOLO 모델 경로 (best.pt)",
+        )
+
+        with gr.Row():
+            zm_conf = gr.Slider(
+                minimum=0.05, maximum=0.95, value=0.15, step=0.05,
+                label="신뢰도 임계값 (conf)",
+            )
+            zm_skip = gr.Slider(
+                minimum=1, maximum=10, value=3, step=1,
+                label="추론 간격 (N프레임마다 1회)",
+            )
+
+        with gr.Row():
+            zm_source_type = gr.Radio(
+                choices=["YouTube URL", "웹캠"],
+                value="YouTube URL",
+                label="소스",
+            )
+
+        zm_youtube_url = gr.Textbox(
+            placeholder="https://www.youtube.com/watch?v=...",
+            label="YouTube URL",
+            visible=True,
+        )
+
+        zm_source_type.change(
+            fn=lambda s: gr.update(visible=(s == "YouTube URL")),
+            inputs=zm_source_type,
+            outputs=zm_youtube_url,
+        )
+
+        with gr.Row():
+            zm_start_btn = gr.Button("스트림 시작", variant="primary")
+            zm_stop_btn  = gr.Button("중지 / 초기화", variant="stop")
+
+        zm_preview = gr.Image(label="실시간 영상", type="numpy", streaming=True)
+        zm_stream_status = gr.Textbox(label="상태", interactive=False)
+
+        gr.Markdown("---")
+        gr.Markdown("#### 영역 설정 (로컬 LLM)")
+
+        with gr.Row():
+            zm_prompt = gr.Textbox(
+                placeholder="예: 문 앞쪽 출입 구역, 컨베이어 벨트 위",
+                label="감시 영역 설명",
+                scale=3,
+            )
+            zm_model = gr.Textbox(
+                value="gemma4:e4b",
+                placeholder="gemma4:e4b",
+                label="Ollama 모델",
+                scale=1,
+            )
+
+        zm_set_btn = gr.Button("영역 설정 (LLM 분석)", variant="secondary")
+
+        zm_zone_status  = gr.Textbox(label="영역 설정 결과", interactive=False)
+        zm_llm_log      = gr.Code(label="LLM 응답 (JSON)", language="json", interactive=False)
+
+        zm_stream_event = zm_start_btn.click(
+            fn=zone_monitor.stream,
+            inputs=[zm_source_type, zm_youtube_url, zm_model_path, zm_conf, zm_skip],
+            outputs=[zm_preview, zm_stream_status],
+        )
+        zm_stop_btn.click(
+            fn=zone_monitor.reset,
+            cancels=[zm_stream_event],
+        )
+        zm_set_btn.click(
+            fn=zone_monitor.set_zone,
+            inputs=[zm_prompt, zm_model],
+            outputs=[zm_zone_status, zm_llm_log],
         )
 
 

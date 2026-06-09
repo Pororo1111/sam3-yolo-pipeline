@@ -16,6 +16,8 @@ YouTube URL 또는 웹캠을 소스로 받아 YOLO 모델을 학습하고 추론
 [Tab 4] YOLO 학습
     ↓
 [Tab 5] 추론
+    ↓
+[Tab 6] 침입 감지 (로컬 LLM 영역 설정 + YOLO 실시간 감시)
 ```
 
 ---
@@ -29,6 +31,8 @@ YouTube URL 또는 웹캠을 소스로 받아 YOLO 모델을 학습하고 추론
 | 영상 처리 | `opencv-python` |
 | SAM3 오토라벨링 | `ultralytics` — `SAM3SemanticPredictor` |
 | YOLO 학습/추론 | `ultralytics` — `YOLO("yolo26n.pt")` |
+| 로컬 LLM (VLM) | `ollama` REST API — `gemma4:e4b` (영역 설정) |
+| HTTP 클라이언트 | `requests` — Ollama API 호출 |
 
 ---
 
@@ -44,7 +48,8 @@ yolo-webui/
 │   ├── labeler.py          ← Tab 2: SAM3 오토라벨링     (완료)
 │   ├── dataset.py          ← Tab 3: 데이터셋 검토/구성  (완료)
 │   ├── trainer.py          ← Tab 4: YOLO 학습           (완료)
-│   └── inference.py        ← Tab 5: 추론                (완료)
+│   ├── inference.py        ← Tab 5: 추론                (완료)
+│   └── zone_monitor.py     ← Tab 6: 침입 감지           (완료)
 ├── dataset/
 │   ├── raw_frames/         ← 추출된 원본 프레임
 │   ├── images/train|val/   ← 분할된 학습/검증 이미지
@@ -140,6 +145,28 @@ cls_ids = results[0].boxes.cls.cpu().numpy().astype(int)
 - `ultralytics` 로거 ERROR 레벨 설정 — "Waiting for stream" 경고 억제
 - 모델 경로 미입력 시 `runs/detect/` 에서 최신 `best.pt` 자동 탐색
 - `gr.Image(streaming=True)` 사용
+
+### Tab 6 — 침입 감지 (완료)
+**파일**: `pipeline/zone_monitor.py`
+
+- 소스: Tab 1/5와 동일 (YouTube URL or 웹캠)
+- YOLO 모델 경로 미입력 시 `runs/detect/`에서 최신 `best.pt` 자동 탐색
+- **영역 설정 흐름**:
+  1. 스트림 시작 → 마지막 프레임을 `_last_frame`에 계속 저장
+  2. 사용자가 감시 영역을 한국어로 입력
+  3. "영역 설정" 클릭 → 현재 프레임 + 프롬프트를 Ollama(`gemma4:e4b`)에 전송
+  4. LLM이 정규화 좌표 JSON 반환 → `_zones`에 저장
+  5. LLM 응답 원문은 로그 창에 표시
+- **실시간 침입 판별**:
+  - `cv2.pointPolygonTest`로 bbox 중심점이 zone 내부인지 검사
+  - zone 내 객체 없음: 초록 테두리
+  - zone 내 객체 있음: 빨강 테두리 + 반투명 빨강 채우기(25%)
+  - zone 라벨에 `(N)` 형태로 내부 객체 수 실시간 표시
+- `infer_every`: N프레임마다 1회 추론 (기본값 3)
+- `display_interval = 1/15`: 15fps yield 제한
+- zone 라벨은 항상 영어로 출력 (시스템 프롬프트 강제)
+- Ollama API: `http://localhost:11434/api/chat`, `format="json"` 강제
+- 중지 버튼: 스트림 종료 + `_zones` 초기화 + `_last_frame` 초기화
 
 ---
 
