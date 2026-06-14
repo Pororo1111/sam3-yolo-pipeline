@@ -2,7 +2,7 @@
 
 ## 프로젝트 개요
 
-YouTube URL 또는 웹캠을 소스로 받아 YOLO 모델을 학습하고 추론하는 end-to-end 파이프라인 WebUI.
+YouTube URL · 웹캠 · 로컬 이미지 폴더를 소스로 받아 YOLO 모델을 학습하고 추론하는 end-to-end 파이프라인 WebUI.
 
 ## 파이프라인 단계
 
@@ -73,10 +73,14 @@ yolo-webui/
 ### Tab 1 — 프레임 추출 (완료)
 **파일**: `pipeline/extractor.py`
 
-- 소스: YouTube URL (`yt-dlp` 스트림 URL 추출) 또는 웹캠 (`cv2.VideoCapture(0)`)
+- 소스: YouTube URL (`yt-dlp` 스트림 URL 추출) / 웹캠 (`cv2.VideoCapture(0)`) / **이미지 폴더** (로컬 폴더 임포트)
 - 고정 간격 캡처: `frame_interval = src_fps / capture_fps`
-- 목표: 500장, 중지 버튼으로 언제든 중단 가능
+- **무제한 추출** — 영상 종료 또는 중지 버튼 전까지 계속 저장 (이전 500장 상한 제거)
+- 시작 시 `dataset/raw_frames/`의 기존 `frame_*.jpg` 삭제 후 새로 저장
 - 저장 경로: `dataset/raw_frames/frame_XXXXX.jpg`
+- 이미지 폴더 모드: `np.fromfile`+`cv2.imdecode`로 **유니코드(한글) 경로 안전 처리**, jpg/jpeg/png/bmp/webp/tiff 지원, jpg로 통일 저장
+- 폴더 선택은 tkinter 네이티브 다이얼로그(`filedialog.askdirectory`) 사용
+- 소스 라디오 전환 시 입력칸 표시는 **클라이언트 JS 토글**(`elem_id` + `.src-hidden` CSS 클래스)로 처리 — Gradio 6 큐/동시성 race 회피 (서버 왕복 없음)
 - Gradio 중지: `_stop_event`(threading.Event) + `cancels=[capture_event]` 동시 사용
 - 프리뷰: capture_fps 간격으로만 yield → Gradio WebSocket 부담 최소화
 
@@ -87,6 +91,7 @@ yolo-webui/
 - 텍스트 프롬프트 입력 → 클래스명 자동 매핑
 - 마스크 → YOLO bbox 변환 (x_c y_c w h normalized)
 - 저장 경로: `dataset/labels/frame_XXXXX.txt`
+- 시작 시 `dataset/labels/`의 평면 `*.txt` 삭제 (이전 소스 오라벨이 새 이미지에 붙는 것 방지). `glob("*.txt")`는 최상위만 매칭 → `train/`·`val/` 하위 폴더는 보존
 - `conf=0.25`, `half=False`
 - 라벨링 중 마스크 오버레이 프리뷰 실시간 표시
 
@@ -111,6 +116,7 @@ cls_ids = results[0].boxes.cls.cpu().numpy().astype(int)
 - 통계: 전체 / 라벨 있음 / 라벨 없음 프레임 수
 - "라벨 없는 프레임 제외" 체크박스로 불량 데이터 필터링
 - `build_dataset(prompts_str, val_ratio, filter_empty)`: train/val 분할 후 복사
+- 분할 전 `images/train|val`, `labels/train|val`을 `shutil.rmtree`로 정리 → 재실행 시 데이터 누적 및 같은 프레임이 train/val 양쪽에 섞이는 누수 방지
 - `dataset/dataset.yaml` 자동 생성 (클래스명은 프롬프트에서 자동 설정)
 
 ### Tab 4 — YOLO 학습 (완료)
@@ -138,7 +144,9 @@ cls_ids = results[0].boxes.cls.cpu().numpy().astype(int)
 ### Tab 5 — 추론 (완료)
 **파일**: `pipeline/inference.py`
 
-- 소스: Tab 1과 동일 (YouTube URL or 웹캠), `cv2.VideoCapture` 직접 사용
+- 소스: Tab 1과 동일 (YouTube URL / 웹캠 / 이미지 폴더), 영상은 `cv2.VideoCapture` 직접 사용
+- 이미지 폴더 모드(`_predict_folder`): 폴더 내 이미지를 순회하며 장당 추론·표시, 중지 전까지 반복(0.4초 간격)
+- 이미지 폴더 경로 미입력 시 **Tab 1에서 선택한 폴더 경로를 자동 상속**(`_inherit_folder`)
 - `infer_every`: N프레임마다 1회 추론, 나머지는 마지막 bbox 재사용 (기본값 3)
 - `display_interval = 1/15`: 15fps로 yield 제한 → Gradio WebSocket 부담 최소화
 - 표시 해상도: 854px 초과 시 리사이즈
@@ -149,7 +157,10 @@ cls_ids = results[0].boxes.cls.cpu().numpy().astype(int)
 ### Tab 6 — 침입 감지 (완료)
 **파일**: `pipeline/zone_monitor.py`
 
-- 소스: Tab 1/5와 동일 (YouTube URL or 웹캠)
+- 소스: Tab 1/5와 동일 (YouTube URL / 웹캠 / 이미지 폴더)
+- 이미지 폴더 모드(`_stream_folder`): 이미지 순회하며 `_last_frame` 갱신(→ 영역 설정 가능) + 침입 판별, 중지 전까지 반복
+- 이미지 폴더 경로 미입력 시 Tab 1 폴더 경로 자동 상속
+- zone 오버레이 로직은 `_render_zones()` 헬퍼로 추출 — 비디오/폴더 루프 공유
 - YOLO 모델 경로 미입력 시 `runs/detect/`에서 최신 `best.pt` 자동 탐색
 - **영역 설정 흐름**:
   1. 스트림 시작 → 마지막 프레임을 `_last_frame`에 계속 저장
