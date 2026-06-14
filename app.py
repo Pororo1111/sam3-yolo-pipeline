@@ -50,7 +50,7 @@ def run_train(epochs, imgsz, batch, lr0, device):
 
 _HIDE_CSS = ".src-hidden { display: none !important; }"
 
-with gr.Blocks(title="YOLO 파이프라인", css=_HIDE_CSS) as demo:
+with gr.Blocks(title="YOLO 파이프라인") as demo:
 
     # ── Tab 1: 프레임 추출 ──────────────────────────────────────
     with gr.Tab("1. 프레임 추출"):
@@ -431,4 +431,4 @@ with gr.Blocks(title="YOLO 파이프라인", css=_HIDE_CSS) as demo:
 
 
 if __name__ == "__main__":
-    demo.queue().launch(theme=gr.themes.Default())
+    demo.queue().launch(theme=gr.themes.Default(), css=_HIDE_CSS)
