@@ -10,6 +10,8 @@ import requests
 
 OLLAMA_URL = "http://localhost:11434/api/chat"
 
+_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tiff", ".tif"}
+
 
 def _find_best_pt() -> str | None:
     candidates = sorted(Path("runs/detect").glob("*/weights/best.pt"))
@@ -38,6 +40,33 @@ def _overlay_boxes(frame_bgr: np.ndarray, boxes, names: dict) -> np.ndarray:
         cv2.putText(img, label, (x1, max(y1 - 6, 0)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
     return img
+
+def _render_zones(annotated: np.ndarray, last_boxes):
+    """현재 zone들을 annotated 위에 그리고 (annotated, 침입수, zone수) 반환."""
+    with _zone_lock:
+        current_zones = list(_zones)
+
+    total_intruders = 0
+    for zone in current_zones:
+        count = _count_objects_in_zone(last_boxes or [], zone["polygon"])
+        total_intruders += count
+        color = (0, 0, 220) if count > 0 else (0, 220, 80)  # BGR: 빨강 or 초록
+        thickness = 3 if count > 0 else 2
+
+        if count > 0:
+            overlay = annotated.copy()
+            cv2.fillPoly(overlay, [zone["polygon"]], (0, 0, 180))
+            cv2.addWeighted(overlay, 0.25, annotated, 0.75, 0, annotated)
+
+        cv2.polylines(annotated, [zone["polygon"]], True, color, thickness)
+        label = f"{zone['label']} ({count})"
+        tx = zone["polygon"][0][0]
+        ty = max(zone["polygon"][0][1] - 8, 0)
+        cv2.putText(annotated, label, (tx, ty),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+
+    return annotated, total_intruders, len(current_zones)
+
 
 _stop_event = threading.Event()
 _zones: list = []
@@ -73,7 +102,8 @@ def _resolve_source(source_type: str, youtube_url: str):
         return None, f"YouTube URL 처리 실패: {e}"
 
 
-def stream(source_type: str, youtube_url: str, model_path: str, conf: float, infer_every: int):
+def stream(source_type: str, youtube_url: str, model_path: str, conf: float,
+           infer_every: int, folder_path: str = ""):
     global _last_frame
     _stop_event.clear()
 
@@ -92,6 +122,10 @@ def stream(source_type: str, youtube_url: str, model_path: str, conf: float, inf
         return
 
     names = model.names or {}
+
+    if source_type == "이미지 폴더":
+        yield from _stream_folder(model, names, folder_path, conf)
+        return
 
     cap_source, err = _resolve_source(source_type, youtube_url)
     if err:
@@ -133,28 +167,7 @@ def stream(source_type: str, youtube_url: str, model_path: str, conf: float, inf
             annotated = _overlay_boxes(frame_bgr, last_boxes or [], names)
 
             # zone 오버레이
-            with _zone_lock:
-                current_zones = list(_zones)
-
-            total_intruders = 0
-            for zone in current_zones:
-                count = _count_objects_in_zone(last_boxes or [], zone["polygon"])
-                total_intruders += count
-                color = (0, 0, 220) if count > 0 else (0, 220, 80)  # BGR: 빨강 or 초록
-                thickness = 3 if count > 0 else 2
-
-                # zone 반투명 채우기 (침입 시)
-                if count > 0:
-                    overlay = annotated.copy()
-                    cv2.fillPoly(overlay, [zone["polygon"]], (0, 0, 180))
-                    cv2.addWeighted(overlay, 0.25, annotated, 0.75, 0, annotated)
-
-                cv2.polylines(annotated, [zone["polygon"]], True, color, thickness)
-                label = f"{zone['label']} ({count})"
-                tx = zone["polygon"][0][0]
-                ty = max(zone["polygon"][0][1] - 8, 0)
-                cv2.putText(annotated, label, (tx, ty),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+            annotated, total_intruders, n_zones = _render_zones(annotated, last_boxes)
 
             h, w = annotated.shape[:2]
             if w > 854:
@@ -164,7 +177,7 @@ def stream(source_type: str, youtube_url: str, model_path: str, conf: float, inf
             rgb = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
             frame_idx += 1
             status = (
-                f"프레임 {frame_idx} | 영역: {len(current_zones)}개 | "
+                f"프레임 {frame_idx} | 영역: {n_zones}개 | "
                 f"침입 객체: {total_intruders}개"
             )
             yield rgb, status
@@ -173,6 +186,58 @@ def stream(source_type: str, youtube_url: str, model_path: str, conf: float, inf
         yield None, f"스트림 오류: {e}"
     finally:
         cap.release()
+
+    yield None, "스트림 종료"
+
+
+def _stream_folder(model, names: dict, folder_path: str, conf: float):
+    """이미지 폴더를 순회하며 zone 감시 (중지 전까지 반복)."""
+    global _last_frame
+
+    src = Path(folder_path.strip()) if folder_path and folder_path.strip() else None
+    if src is None or not src.is_dir():
+        yield None, f"이미지 폴더를 찾을 수 없습니다: {folder_path}"
+        return
+
+    images = sorted(p for p in src.iterdir()
+                    if p.is_file() and p.suffix.lower() in _IMAGE_EXTS)
+    if not images:
+        yield None, "폴더에 이미지가 없습니다."
+        return
+
+    yield None, f"이미지 폴더 감시 시작 — {len(images)}장 (영역 설정 후 침입 판별)"
+
+    shown = 0
+    while not _stop_event.is_set():
+        for p in images:
+            if _stop_event.is_set():
+                break
+            buf = np.fromfile(str(p), dtype=np.uint8)
+            frame_bgr = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+            if frame_bgr is None:
+                continue
+
+            with _last_frame_lock:
+                _last_frame = frame_bgr.copy()
+
+            results = model(frame_bgr, conf=conf, verbose=False)
+            last_boxes = results[0].boxes if results[0].boxes is not None else None
+
+            annotated = _overlay_boxes(frame_bgr, last_boxes or [], names)
+            annotated, total_intruders, n_zones = _render_zones(annotated, last_boxes)
+
+            h, w = annotated.shape[:2]
+            if w > 854:
+                scale = 854 / w
+                annotated = cv2.resize(annotated, (854, int(h * scale)))
+
+            rgb = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
+            shown += 1
+            yield rgb, (
+                f"{p.name} | 영역: {n_zones}개 | "
+                f"침입 객체: {total_intruders}개 ({shown})"
+            )
+            time.sleep(0.4)
 
     yield None, "스트림 종료"
 

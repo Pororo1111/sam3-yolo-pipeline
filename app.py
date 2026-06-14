@@ -1,11 +1,30 @@
 import html as _html
+import tkinter as tk
+from tkinter import filedialog
+from pathlib import Path
 
 import gradio as gr
 from pipeline import extractor, labeler, dataset, trainer, inference, zone_monitor
 
 
-def run_capture(source_type, youtube_url, capture_fps):
-    yield from extractor.capture(source_type, youtube_url, int(capture_fps))
+def _pick_folder():
+    root = tk.Tk()
+    root.withdraw()
+    root.wm_attributes("-topmost", 1)
+    path = filedialog.askdirectory(title="이미지 폴더 선택", initialdir=str(Path.cwd()))
+    root.destroy()
+    return path or ""
+
+
+def _inherit_folder(source_type, current_path, tab1_path):
+    """이미지 폴더 선택 시, 경로가 비어 있으면 Tab 1의 폴더 경로를 채운다."""
+    if source_type == "이미지 폴더" and not (current_path or "").strip():
+        return gr.update(value=tab1_path or "")
+    return gr.update()
+
+
+def run_capture(source_type, youtube_url, capture_fps, folder_path):
+    yield from extractor.capture(source_type, youtube_url, int(capture_fps), folder_path)
 
 
 def run_label(prompts_str, conf):
@@ -29,33 +48,52 @@ def run_train(epochs, imgsz, batch, lr0, device):
         yield f'<div style="{_WRAP_STYLE}"><pre style="{_PRE_STYLE}">{escaped}</pre></div>'
 
 
-with gr.Blocks(title="YOLO 파이프라인", theme=gr.themes.Default()) as demo:
+_HIDE_CSS = ".src-hidden { display: none !important; }"
+
+with gr.Blocks(title="YOLO 파이프라인", css=_HIDE_CSS) as demo:
 
     # ── Tab 1: 프레임 추출 ──────────────────────────────────────
     with gr.Tab("1. 프레임 추출"):
-        gr.Markdown("### 소스 선택 & 프레임 500장 추출")
+        gr.Markdown("### 소스 선택 & 프레임 추출 (중지 버튼으로 종료)")
 
         with gr.Row():
             source_type = gr.Radio(
-                choices=["YouTube URL", "웹캠"],
+                choices=["YouTube URL", "웹캠", "이미지 폴더"],
                 value="YouTube URL",
                 label="소스",
             )
             capture_fps = gr.Slider(
                 minimum=1, maximum=30, value=5, step=1,
                 label="캡처 FPS (초당 저장 프레임 수)",
+                info="이미지 폴더 선택 시 무시됨",
             )
 
         youtube_url = gr.Textbox(
             placeholder="https://www.youtube.com/watch?v=...",
             label="YouTube URL",
-            visible=True,
+            elem_id="tab1_youtube_url",
         )
+        with gr.Row(elem_id="tab1_folder_row", elem_classes=["src-hidden"]) as folder_row:
+            folder_path = gr.Textbox(
+                placeholder="C:/Users/me/my_images",
+                label="이미지 폴더 경로",
+                info="jpg, jpeg, png, bmp, webp, tiff 지원 — 하위 폴더 미포함",
+                scale=5,
+            )
+            folder_browse_btn = gr.Button("폴더 선택", scale=1, min_width=100)
+
+        folder_browse_btn.click(fn=_pick_folder, outputs=folder_path)
 
         source_type.change(
-            fn=lambda s: gr.update(visible=(s == "YouTube URL")),
+            fn=None,
             inputs=source_type,
-            outputs=youtube_url,
+            outputs=None,
+            js="""(s) => {
+                const yt = document.getElementById('tab1_youtube_url');
+                const fr = document.getElementById('tab1_folder_row');
+                if (yt) yt.classList.toggle('src-hidden', s !== 'YouTube URL');
+                if (fr) fr.classList.toggle('src-hidden', s !== '이미지 폴더');
+            }""",
         )
 
         with gr.Row():
@@ -67,7 +105,7 @@ with gr.Blocks(title="YOLO 파이프라인", theme=gr.themes.Default()) as demo:
 
         capture_event = cap_start_btn.click(
             fn=run_capture,
-            inputs=[source_type, youtube_url, capture_fps],
+            inputs=[source_type, youtube_url, capture_fps, folder_path],
             outputs=[cap_preview, cap_status],
         )
         cap_stop_btn.click(
@@ -231,7 +269,7 @@ with gr.Blocks(title="YOLO 파이프라인", theme=gr.themes.Default()) as demo:
 
         with gr.Row():
             inf_source_type = gr.Radio(
-                choices=["YouTube URL", "웹캠"],
+                choices=["YouTube URL", "웹캠", "이미지 폴더"],
                 value="YouTube URL",
                 label="소스",
             )
@@ -239,13 +277,35 @@ with gr.Blocks(title="YOLO 파이프라인", theme=gr.themes.Default()) as demo:
         inf_youtube_url = gr.Textbox(
             placeholder="https://www.youtube.com/watch?v=...",
             label="YouTube URL",
-            visible=True,
+            elem_id="tab5_youtube_url",
         )
+        with gr.Row(elem_id="tab5_folder_row", elem_classes=["src-hidden"]) as inf_folder_row:
+            inf_folder_path = gr.Textbox(
+                placeholder="C:/Users/me/my_images",
+                label="이미지 폴더 경로",
+                info="비우면 Tab 1에서 선택한 폴더를 자동 사용",
+                scale=5,
+            )
+            inf_folder_browse_btn = gr.Button("폴더 선택", scale=1, min_width=100)
+
+        inf_folder_browse_btn.click(fn=_pick_folder, outputs=inf_folder_path)
 
         inf_source_type.change(
-            fn=lambda s: gr.update(visible=(s == "YouTube URL")),
+            fn=None,
             inputs=inf_source_type,
-            outputs=inf_youtube_url,
+            outputs=None,
+            js="""(s) => {
+                const yt = document.getElementById('tab5_youtube_url');
+                const fr = document.getElementById('tab5_folder_row');
+                if (yt) yt.classList.toggle('src-hidden', s !== 'YouTube URL');
+                if (fr) fr.classList.toggle('src-hidden', s !== '이미지 폴더');
+            }""",
+        )
+        inf_source_type.change(
+            fn=_inherit_folder,
+            inputs=[inf_source_type, inf_folder_path, folder_path],
+            outputs=inf_folder_path,
+            show_progress="hidden",
         )
 
         with gr.Row():
@@ -257,7 +317,7 @@ with gr.Blocks(title="YOLO 파이프라인", theme=gr.themes.Default()) as demo:
 
         inf_event = inf_start_btn.click(
             fn=inference.predict,
-            inputs=[inf_model_path, inf_source_type, inf_youtube_url, inf_conf, inf_skip],
+            inputs=[inf_model_path, inf_source_type, inf_youtube_url, inf_conf, inf_skip, inf_folder_path],
             outputs=[inf_preview, inf_status],
         )
         inf_stop_btn.click(
@@ -287,7 +347,7 @@ with gr.Blocks(title="YOLO 파이프라인", theme=gr.themes.Default()) as demo:
 
         with gr.Row():
             zm_source_type = gr.Radio(
-                choices=["YouTube URL", "웹캠"],
+                choices=["YouTube URL", "웹캠", "이미지 폴더"],
                 value="YouTube URL",
                 label="소스",
             )
@@ -295,13 +355,35 @@ with gr.Blocks(title="YOLO 파이프라인", theme=gr.themes.Default()) as demo:
         zm_youtube_url = gr.Textbox(
             placeholder="https://www.youtube.com/watch?v=...",
             label="YouTube URL",
-            visible=True,
+            elem_id="tab6_youtube_url",
         )
+        with gr.Row(elem_id="tab6_folder_row", elem_classes=["src-hidden"]) as zm_folder_row:
+            zm_folder_path = gr.Textbox(
+                placeholder="C:/Users/me/my_images",
+                label="이미지 폴더 경로",
+                info="비우면 Tab 1에서 선택한 폴더를 자동 사용",
+                scale=5,
+            )
+            zm_folder_browse_btn = gr.Button("폴더 선택", scale=1, min_width=100)
+
+        zm_folder_browse_btn.click(fn=_pick_folder, outputs=zm_folder_path)
 
         zm_source_type.change(
-            fn=lambda s: gr.update(visible=(s == "YouTube URL")),
+            fn=None,
             inputs=zm_source_type,
-            outputs=zm_youtube_url,
+            outputs=None,
+            js="""(s) => {
+                const yt = document.getElementById('tab6_youtube_url');
+                const fr = document.getElementById('tab6_folder_row');
+                if (yt) yt.classList.toggle('src-hidden', s !== 'YouTube URL');
+                if (fr) fr.classList.toggle('src-hidden', s !== '이미지 폴더');
+            }""",
+        )
+        zm_source_type.change(
+            fn=_inherit_folder,
+            inputs=[zm_source_type, zm_folder_path, folder_path],
+            outputs=zm_folder_path,
+            show_progress="hidden",
         )
 
         with gr.Row():
@@ -334,7 +416,7 @@ with gr.Blocks(title="YOLO 파이프라인", theme=gr.themes.Default()) as demo:
 
         zm_stream_event = zm_start_btn.click(
             fn=zone_monitor.stream,
-            inputs=[zm_source_type, zm_youtube_url, zm_model_path, zm_conf, zm_skip],
+            inputs=[zm_source_type, zm_youtube_url, zm_model_path, zm_conf, zm_skip, zm_folder_path],
             outputs=[zm_preview, zm_stream_status],
         )
         zm_stop_btn.click(
@@ -349,4 +431,4 @@ with gr.Blocks(title="YOLO 파이프라인", theme=gr.themes.Default()) as demo:
 
 
 if __name__ == "__main__":
-    demo.launch()
+    demo.queue().launch(theme=gr.themes.Default())

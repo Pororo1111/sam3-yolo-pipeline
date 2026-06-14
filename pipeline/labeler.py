@@ -63,6 +63,11 @@ def label(prompts_str: str, conf: float):
 
     LABELS_DIR.mkdir(parents=True, exist_ok=True)
 
+    # 기존 평면 라벨 삭제 — 이전 소스의 오라벨이 새 이미지에 붙는 것 방지
+    # (train/val 하위 폴더는 glob("*.txt")에 걸리지 않아 보존됨)
+    for old in LABELS_DIR.glob("*.txt"):
+        old.unlink()
+
     yield None, "SAM3 모델 로딩 중..."
 
     try:

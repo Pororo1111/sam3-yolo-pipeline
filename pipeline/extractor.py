@@ -1,10 +1,13 @@
 import threading
+import shutil
 import cv2
+import numpy as np
 import yt_dlp
 from pathlib import Path
 
 OUT_DIR = Path("dataset/raw_frames")
-TARGET_FRAMES = 500
+
+_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tiff", ".tif"}
 
 _stop_event = threading.Event()
 
@@ -31,10 +34,10 @@ def _get_youtube_stream_url(url: str) -> str:
         return info["url"]
 
 
-def capture(source_type: str, youtube_url: str, capture_fps: int):
+def capture(source_type: str, youtube_url: str, capture_fps: int, folder_path: str = ""):
     """
     Generator — yields (rgb_frame | None, status_str) until done or stopped.
-    source_type: "YouTube URL" | "웹캠"
+    source_type: "YouTube URL" | "웹캠" | "이미지 폴더"
     """
     _stop_event.clear()
     OUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -42,6 +45,11 @@ def capture(source_type: str, youtube_url: str, capture_fps: int):
     # 기존 프레임 삭제
     for f in OUT_DIR.glob("frame_*.jpg"):
         f.unlink()
+
+    # ── 이미지 폴더 임포트 ─────────────────────────────────────
+    if source_type == "이미지 폴더":
+        yield from _import_from_folder(folder_path)
+        return
 
     # ── 소스 열기 ──────────────────────────────────────────────
     if source_type == "YouTube URL":
@@ -72,7 +80,7 @@ def capture(source_type: str, youtube_url: str, capture_fps: int):
     frame_idx = 0
     saved = 0
 
-    while saved < TARGET_FRAMES:
+    while True:
         if _stop_event.is_set():
             break
 
@@ -86,7 +94,7 @@ def capture(source_type: str, youtube_url: str, capture_fps: int):
             saved += 1
 
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            yield rgb, f"{saved} / {TARGET_FRAMES} 프레임 저장"
+            yield rgb, f"{saved}장 저장 중..."
 
         frame_idx += 1
 
@@ -96,3 +104,64 @@ def capture(source_type: str, youtube_url: str, capture_fps: int):
         yield None, f"중지됨 — {saved}장 저장 완료  →  {OUT_DIR.resolve()}"
     else:
         yield None, f"완료 — {saved}장 저장 완료  →  {OUT_DIR.resolve()}"
+
+
+def _imread_any_path(path: Path) -> "np.ndarray | None":
+    """cv2.imread는 한글/유니코드 경로를 못 읽으므로 np.fromfile 경유."""
+    buf = np.fromfile(str(path), dtype=np.uint8)
+    return cv2.imdecode(buf, cv2.IMREAD_COLOR)
+
+
+def _import_from_folder(folder_path: str):
+    """이미지 폴더에서 raw_frames로 복사."""
+    if not folder_path or not folder_path.strip():
+        yield None, "폴더 경로를 입력하세요."
+        return
+
+    src = Path(folder_path.strip())
+    if not src.exists():
+        yield None, f"폴더를 찾을 수 없습니다: {src}"
+        return
+    if not src.is_dir():
+        yield None, f"폴더가 아닙니다: {src}"
+        return
+
+    yield None, f"폴더 스캔 중... {src}"
+
+    try:
+        images = sorted(
+            p for p in src.iterdir()
+            if p.is_file() and p.suffix.lower() in _IMAGE_EXTS
+        )
+    except Exception as e:
+        yield None, f"폴더 읽기 실패: {e}"
+        return
+
+    if not images:
+        yield None, f"이미지 파일이 없습니다 (지원 형식: {', '.join(sorted(_IMAGE_EXTS))})"
+        return
+
+    total = len(images)
+    yield None, f"{total}장 발견 — 복사 시작..."
+
+    copied = 0
+    for idx, src_path in enumerate(images):
+        if _stop_event.is_set():
+            yield None, f"중지됨 — {copied}장 복사 완료  →  {OUT_DIR.resolve()}"
+            return
+
+        dst_path = OUT_DIR / f"frame_{copied:05d}.jpg"
+
+        try:
+            bgr = _imread_any_path(src_path)
+            if bgr is None:
+                yield None, f"{idx + 1}/{total}  건너뜀 (읽기 실패): {src_path.name}"
+                continue
+            cv2.imwrite(str(dst_path), bgr)
+            copied += 1
+            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+            yield rgb, f"{copied} / {total} 복사 완료"
+        except Exception as e:
+            yield None, f"{src_path.name} 처리 실패: {e}"
+
+    yield None, f"완료 — {copied}장 복사  →  {OUT_DIR.resolve()}"

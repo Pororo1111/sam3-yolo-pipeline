@@ -112,6 +112,13 @@ def build_dataset(prompts_str: str, val_ratio: float, filter_empty: bool):
         yield "라벨이 있는 프레임이 없습니다. 먼저 Tab 2에서 오토라벨링을 실행하세요."
         return
 
+    # 기존 분할 결과 삭제 — 누적/train·val 누수(같은 프레임이 양쪽에 섞임) 방지
+    for split_name in ("train", "val"):
+        for d in (IMAGES_DIR / split_name, Path("dataset/labels") / split_name):
+            if d.exists():
+                shutil.rmtree(d)
+    yield "기존 train/val 폴더 정리 완료"
+
     random.shuffle(frames)
     split = max(1, int(len(frames) * (1 - val_ratio)))
     train_frames = frames[:split]

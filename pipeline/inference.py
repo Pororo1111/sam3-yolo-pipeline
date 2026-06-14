@@ -7,6 +7,8 @@ from pathlib import Path
 
 logging.getLogger("ultralytics").setLevel(logging.ERROR)
 
+_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tiff", ".tif"}
+
 _stop_event = threading.Event()
 
 
@@ -44,7 +46,7 @@ def _cls_color(cls_id: int) -> tuple:
 
 
 def predict(model_path: str, source_type: str, youtube_url: str,
-            conf: float, infer_every: int):
+            conf: float, infer_every: int, folder_path: str = ""):
     """
     Generator — yields (rgb_frame | None, status_str)
     infer_every: N프레임마다 1회 추론, 나머지는 마지막 bbox 재사용
@@ -76,6 +78,10 @@ def predict(model_path: str, source_type: str, youtube_url: str,
         return
 
     names = model.names or {}
+
+    if source_type == "이미지 폴더":
+        yield from _predict_folder(model, names, folder_path, conf)
+        return
 
     if source_type == "웹캠":
         cap_source = 0
@@ -148,3 +154,49 @@ def predict(model_path: str, source_type: str, youtube_url: str,
         cap.release()
 
     yield None, f"추론 완료 — 총 {frame_idx}프레임 처리"
+
+
+def _predict_folder(model, names: dict, folder_path: str, conf: float):
+    """이미지 폴더의 모든 이미지를 순회하며 추론 (중지 전까지 반복)."""
+    src = Path(folder_path.strip()) if folder_path and folder_path.strip() else None
+    if src is None or not src.is_dir():
+        yield None, f"이미지 폴더를 찾을 수 없습니다: {folder_path}"
+        return
+
+    images = sorted(p for p in src.iterdir()
+                    if p.is_file() and p.suffix.lower() in _IMAGE_EXTS)
+    if not images:
+        yield None, "폴더에 이미지가 없습니다."
+        return
+
+    yield None, f"이미지 폴더 추론 시작 — {len(images)}장"
+
+    shown = 0
+    while not _stop_event.is_set():
+        for p in images:
+            if _stop_event.is_set():
+                break
+            buf = np.fromfile(str(p), dtype=np.uint8)
+            frame_bgr = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+            if frame_bgr is None:
+                continue
+
+            t0 = time.perf_counter()
+            results = model(frame_bgr, conf=conf, verbose=False)
+            t_infer = (time.perf_counter() - t0) * 1000
+            boxes = results[0].boxes if results[0].boxes is not None else None
+            n_det = len(boxes) if boxes else 0
+
+            annotated = _overlay_boxes(frame_bgr, boxes, names)
+            h, w = annotated.shape[:2]
+            if w > 854:
+                scale = 854 / w
+                annotated = cv2.resize(annotated, (854, int(h * scale)),
+                                       interpolation=cv2.INTER_LINEAR)
+
+            rgb = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
+            shown += 1
+            yield rgb, f"{p.name}  |  감지 {n_det}개  |  추론 {t_infer:.0f}ms  ({shown})"
+            time.sleep(0.4)
+
+    yield None, f"중지됨 — {shown}장 표시"
