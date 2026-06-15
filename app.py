@@ -149,10 +149,19 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
     with gr.Tab("3. 데이터셋 구성"):
         gr.Markdown("### 라벨링 결과 검토 후 train/val 분할")
 
-        ds_prompts = gr.Textbox(
-            placeholder="person, car, bicycle",
-            label="클래스 프롬프트 (Tab 2와 동일하게 입력)",
+        with gr.Row():
+            ds_prompts = gr.Textbox(
+                placeholder="person, car, bicycle",
+                label="클래스 프롬프트 (Tab 2와 동일한 순서로 입력)",
+                scale=4,
+            )
+            scan_cls_btn = gr.Button("클래스 현황 스캔", variant="secondary", scale=1)
+        cls_info = gr.Textbox(
+            label="현재 라벨 클래스 현황 (ID → 개수)",
+            interactive=False,
+            lines=3,
         )
+        scan_cls_btn.click(fn=dataset.scan_class_ids, outputs=[cls_info])
 
         with gr.Row():
             filter_empty_chk = gr.Checkbox(
@@ -167,7 +176,7 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
         preview_btn = gr.Button("라벨 미리보기 로드", variant="secondary")
         ds_stats    = gr.Textbox(label="통계", interactive=False)
         ds_gallery  = gr.Gallery(
-            label="프레임별 라벨 확인",
+            label="프레임별 라벨 확인 (클릭하면 상세 보기)",
             columns=4,
             height=500,
             object_fit="contain",
@@ -177,6 +186,31 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
             fn=dataset.load_preview,
             inputs=[ds_prompts, filter_empty_chk],
             outputs=[ds_gallery, ds_stats],
+        )
+
+        # ── 상세 보기 & 삭제 ────────────────────────────────────────
+        with gr.Row():
+            ds_detail = gr.Image(
+                label="상세 보기",
+                type="numpy",
+                interactive=False,
+                visible=True,
+                height=400,
+            )
+        selected_stem_state = gr.State(value="")
+        with gr.Row():
+            delete_btn    = gr.Button("이 이미지 삭제", variant="stop")
+            delete_status = gr.Textbox(label="삭제 결과", interactive=False, scale=3)
+
+        ds_gallery.select(
+            fn=dataset.select_frame,
+            inputs=[ds_prompts],
+            outputs=[ds_detail, selected_stem_state, delete_status],
+        )
+        delete_btn.click(
+            fn=dataset.delete_frame,
+            inputs=[selected_stem_state, ds_prompts, filter_empty_chk],
+            outputs=[ds_gallery, ds_stats, ds_detail, selected_stem_state, delete_status],
         )
 
         gr.Markdown("---")

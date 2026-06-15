@@ -88,6 +88,69 @@ def load_preview(prompts_str: str, filter_empty: bool):
     return gallery, stats
 
 
+def scan_class_ids() -> str:
+    """labels/ 폴더의 txt 파일을 스캔해 클래스 ID별 객체 수를 반환."""
+    label_files = list(LABELS_DIR.glob("*.txt"))
+    if not label_files:
+        return "라벨 파일이 없습니다. Tab 2에서 오토라벨링을 먼저 실행하세요."
+
+    counts: dict[int, int] = {}
+    for lf in label_files:
+        for line in lf.read_text().strip().splitlines():
+            parts = line.split()
+            if len(parts) == 5:
+                cid = int(parts[0])
+                counts[cid] = counts.get(cid, 0) + 1
+
+    if not counts:
+        return "라벨된 객체가 없습니다."
+
+    lines = [f"ID {cid}: {cnt}개 객체" for cid, cnt in sorted(counts.items())]
+    lines.append("→ 위 순서(ID 0, 1, 2…)에 맞춰 클래스 프롬프트를 입력하세요.")
+    return "\n".join(lines)
+
+
+def select_frame(prompts_str: str, evt):
+    """갤러리 클릭 핸들러 — 상세 이미지와 선택 파일명 반환."""
+    caption = evt.value if hasattr(evt, "value") else ""
+    frame_name = caption.split("  ")[0].strip()
+    frame_stem = Path(frame_name).stem
+
+    fp = FRAMES_DIR / frame_name
+    lp = LABELS_DIR / (frame_stem + ".txt")
+
+    bgr = cv2.imread(str(fp))
+    if bgr is None:
+        return None, "", f"이미지를 불러올 수 없습니다: {frame_name}"
+
+    prompts = [p.strip() for p in prompts_str.split(",") if p.strip()]
+    annotated = _draw_bboxes(bgr, lp, prompts)
+    rgb = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
+    return rgb, frame_stem, f"선택: {frame_name}"
+
+
+def delete_frame(frame_stem: str, prompts_str: str, filter_empty: bool):
+    """선택된 프레임 이미지와 라벨을 삭제하고 갤러리를 갱신."""
+    if not frame_stem:
+        gallery, stats = load_preview(prompts_str, filter_empty)
+        return gallery, stats, None, "", "삭제할 프레임을 먼저 선택하세요."
+
+    fp = FRAMES_DIR / (frame_stem + ".jpg")
+    lp = LABELS_DIR / (frame_stem + ".txt")
+
+    deleted = []
+    if fp.exists():
+        fp.unlink()
+        deleted.append(fp.name)
+    if lp.exists():
+        lp.unlink()
+        deleted.append(lp.name)
+
+    gallery, stats = load_preview(prompts_str, filter_empty)
+    msg = f"삭제 완료: {', '.join(deleted)}" if deleted else "파일을 찾을 수 없습니다."
+    return gallery, stats, None, "", msg
+
+
 def build_dataset(prompts_str: str, val_ratio: float, filter_empty: bool):
     """
     train/val 분할 + dataset.yaml 생성.
