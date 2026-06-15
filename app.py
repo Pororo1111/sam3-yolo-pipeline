@@ -146,22 +146,18 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
 
 
     # ── Tab 3: 데이터셋 검토 & 구성 ────────────────────────────────
-    with gr.Tab("3. 데이터셋 구성"):
+    with gr.Tab("3. 데이터셋 구성") as tab3:
         gr.Markdown("### 라벨링 결과 검토 후 train/val 분할")
 
-        with gr.Row():
-            ds_prompts = gr.Textbox(
-                placeholder="person, car, bicycle",
-                label="클래스 프롬프트 (Tab 2와 동일한 순서로 입력)",
-                scale=4,
-            )
-            scan_cls_btn = gr.Button("클래스 현황 스캔", variant="secondary", scale=1)
         cls_info = gr.Textbox(
             label="현재 라벨 클래스 현황 (ID → 개수)",
             interactive=False,
             lines=3,
         )
-        scan_cls_btn.click(fn=dataset.scan_class_ids, outputs=[cls_info])
+        ds_prompts = gr.Textbox(
+            placeholder="person, car, bicycle",
+            label="클래스 프롬프트 (위 ID 순서에 맞게 입력)",
+        )
 
         with gr.Row():
             filter_empty_chk = gr.Checkbox(
@@ -222,6 +218,8 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
             inputs=[ds_prompts, val_ratio_slider, filter_empty_chk],
             outputs=build_status,
         )
+
+        tab3.select(fn=dataset.scan_class_ids, outputs=[cls_info])
 
     # ── Tab 4: YOLO 학습 ────────────────────────────────────────
     with gr.Tab("4. YOLO 학습"):
