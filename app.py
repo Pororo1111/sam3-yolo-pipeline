@@ -1,7 +1,7 @@
 import html as _html
 
 import gradio as gr
-from pipeline import extractor, labeler, dataset, trainer, inference, zone_monitor
+from pipeline import extractor, labeler, dataset, trainer, inference, zone_monitor, models
 
 
 def _inherit_folder(source_type, current_files, tab1_files):
@@ -15,11 +15,15 @@ def run_capture(source_type, youtube_url, capture_fps, folder_files):
     yield from extractor.capture(source_type, youtube_url, int(capture_fps), folder_files)
 
 
-def load_classes(current_prompts, label_prompts):
-    """라벨에서 클래스 목록을 스캔해 (class_state, 최종 클래스 이름 문자열) 반환."""
-    classes = dataset.scan_classes(current_prompts or "", label_prompts or "")
+def load_classes(label_prompts):
+    """라벨을 스캔해 (class_state, 최종 클래스 이름, 로드 기준 Tab2 프롬프트) 반환.
+
+    이름은 Tab 2 프롬프트(label_prompts)를 우선으로 새로 구성한다.
+    세 번째 반환값은 "이 프롬프트 기준으로 로드했다"는 추적용 값.
+    """
+    classes = dataset.scan_classes(label_prompts or "")
     joined = ", ".join(c["name"] for c in classes)
-    return classes, joined
+    return classes, joined, (label_prompts or "")
 
 
 def run_label(prompts_str, conf):
@@ -205,12 +209,15 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
         gr.Markdown("### 라벨링 결과 검토 후 train/val 분할")
 
         gr.Markdown(
-            "#### 클래스 목록 — 이름을 클릭해 바로 수정하세요\n"
-            "라벨에서 감지된 클래스 ID와 객체 수입니다. 각 이름 칸을 수정하면 "
-            "아래 **최종 클래스 이름**에 즉시 반영됩니다."
+            "#### 클래스 목록 — 각 이름 칸에서 바로 수정하세요\n"
+            "라벨에서 감지된 클래스 ID와 객체 수입니다. **이름은 이 칸에서 직접 수정**하면 "
+            "되고, 하단의 '최종 클래스 이름'에 자동 반영됩니다. (Tab 2에서 새로 라벨링하면 "
+            "새 프롬프트 이름으로 자동 갱신됩니다.)"
         )
 
         ds_class_state = gr.State([])
+        # 마지막 로드에 사용한 Tab 2 프롬프트 — 변경 감지(재라벨링 시 자동 갱신)용
+        ds_last_label  = gr.State("")
 
         load_classes_btn = gr.Button("클래스 불러오기 / 새로고침", variant="secondary")
 
@@ -245,8 +252,9 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
                 nb.change(_sync, inputs=name_boxes, outputs=ds_prompts)
 
         ds_prompts = gr.Textbox(
-            label="최종 클래스 이름 (ID 0,1,2… 순서 · 자동 반영, 직접 수정도 가능)",
+            label="최종 클래스 이름 (ID 0,1,2… 순서 · 위 이름 칸에서 자동 생성)",
             placeholder="위에서 클래스를 불러오면 자동으로 채워집니다.",
+            interactive=False,
         )
 
         with gr.Row():
@@ -314,8 +322,8 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
 
         load_classes_btn.click(
             fn=load_classes,
-            inputs=[ds_prompts, prompts_input],
-            outputs=[ds_class_state, ds_prompts],
+            inputs=[prompts_input],
+            outputs=[ds_class_state, ds_prompts, ds_last_label],
         )
 
     # ── YOLO 학습 ────────────────────────────────────────
@@ -561,18 +569,41 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
 
     nav.change(_switch_panel, inputs=nav, outputs=_PANELS)
 
-    def _maybe_load_classes(choice, current_prompts, label_prompts):
-        """데이터셋 단계로 진입할 때만 클래스 목록 자동 로드."""
+    # 패널 전환 직후 강제 리페인트 — Gradio 6에서 visible 토글로 처음 노출된
+    # Column이 레이아웃되지 않아 검정/빈 화면으로 보이는 문제 회피
+    # (resize 이벤트를 dispatch해 Svelte/브라우저의 리플로우를 강제)
+    nav.change(
+        fn=None,
+        inputs=None,
+        outputs=None,
+        js="""() => {
+            requestAnimationFrame(() => {
+                window.dispatchEvent(new Event('resize'));
+                setTimeout(() => window.dispatchEvent(new Event('resize')), 60);
+            });
+        }""",
+    )
+
+    def _maybe_load_classes(choice, label_prompts, last_label, class_state):
+        """데이터셋 단계 진입 시 클래스 목록 로드.
+
+        - Tab 2 프롬프트가 직전 로드와 다르거나(재라벨링) 아직 로드된 적 없으면 새로 로드
+        - 그 외(단순 탭 전환)에는 그대로 두어 사용자가 칸에서 편집한 이름을 보존
+        """
         if choice != "데이터셋 구성":
-            return gr.update(), gr.update()
-        return load_classes(current_prompts, label_prompts)
+            return gr.update(), gr.update(), gr.update()
+        if class_state and (label_prompts or "") == (last_label or ""):
+            return gr.update(), gr.update(), gr.update()
+        return load_classes(label_prompts)
 
     nav.change(
         _maybe_load_classes,
-        inputs=[nav, ds_prompts, prompts_input],
-        outputs=[ds_class_state, ds_prompts],
+        inputs=[nav, prompts_input, ds_last_label, ds_class_state],
+        outputs=[ds_class_state, ds_prompts, ds_last_label],
     )
 
 
 if __name__ == "__main__":
+    # 시작 시 학습용 베이스 모델(yolo26n.pt)이 models/ 에 없으면 자동 다운로드
+    models.ensure_models()
     demo.queue().launch(theme=gr.themes.Default(), css=_CSS)
