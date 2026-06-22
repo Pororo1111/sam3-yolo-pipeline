@@ -79,7 +79,8 @@ yolo-webui/
 - 시작 시 `dataset/raw_frames/`의 기존 `frame_*.jpg` 삭제 후 새로 저장
 - 저장 경로: `dataset/raw_frames/frame_XXXXX.jpg`
 - 이미지 폴더 모드: `np.fromfile`+`cv2.imdecode`로 **유니코드(한글) 경로 안전 처리**, jpg/jpeg/png/bmp/webp/tiff 지원, jpg로 통일 저장
-- 폴더 선택은 tkinter 네이티브 다이얼로그(`filedialog.askdirectory`) 사용
+- 폴더 선택은 **Gradio 내장 파일 업로드**(`gr.File(file_count="directory", type="filepath")`) 사용 — 브라우저 기반이라 macOS·Windows·Linux 모두 동작 (이전 tkinter `filedialog` 방식은 macOS 미대응으로 제거)
+- 업로드 파일 리스트는 `_filter_image_paths()`로 지원 확장자만 필터링 후 파일명 기준 정렬. gr.File 경로(str) 및 `.name` 속성 객체 모두 방어적으로 처리
 - 소스 라디오 전환 시 입력칸 표시는 **클라이언트 JS 토글**(`elem_id` + `.src-hidden` CSS 클래스)로 처리 — Gradio 6 큐/동시성 race 회피 (서버 왕복 없음)
 - Gradio 중지: `_stop_event`(threading.Event) + `cancels=[capture_event]` 동시 사용
 - 프리뷰: capture_fps 간격으로만 yield → Gradio WebSocket 부담 최소화
@@ -145,8 +146,8 @@ cls_ids = results[0].boxes.cls.cpu().numpy().astype(int)
 **파일**: `pipeline/inference.py`
 
 - 소스: Tab 1과 동일 (YouTube URL / 웹캠 / 이미지 폴더), 영상은 `cv2.VideoCapture` 직접 사용
-- 이미지 폴더 모드(`_predict_folder`): 폴더 내 이미지를 순회하며 장당 추론·표시, 중지 전까지 반복(0.4초 간격)
-- 이미지 폴더 경로 미입력 시 **Tab 1에서 선택한 폴더 경로를 자동 상속**(`_inherit_folder`)
+- 이미지 폴더 모드(`_predict_folder`): 업로드된 이미지를 순회하며 장당 추론·표시, 중지 전까지 반복(0.4초 간격)
+- 폴더 입력은 `gr.File(file_count="directory")` 업로드. 업로드가 비어 있으면 **Tab 1 업로드 파일을 자동 상속**(`_inherit_folder`)
 - `infer_every`: N프레임마다 1회 추론, 나머지는 마지막 bbox 재사용 (기본값 3)
 - `display_interval = 1/15`: 15fps로 yield 제한 → Gradio WebSocket 부담 최소화
 - 표시 해상도: 854px 초과 시 리사이즈
@@ -158,8 +159,8 @@ cls_ids = results[0].boxes.cls.cpu().numpy().astype(int)
 **파일**: `pipeline/zone_monitor.py`
 
 - 소스: Tab 1/5와 동일 (YouTube URL / 웹캠 / 이미지 폴더)
-- 이미지 폴더 모드(`_stream_folder`): 이미지 순회하며 `_last_frame` 갱신(→ 영역 설정 가능) + 침입 판별, 중지 전까지 반복
-- 이미지 폴더 경로 미입력 시 Tab 1 폴더 경로 자동 상속
+- 이미지 폴더 모드(`_stream_folder`): 업로드 이미지 순회하며 `_last_frame` 갱신(→ 영역 설정 가능) + 침입 판별, 중지 전까지 반복
+- 폴더 입력은 `gr.File(file_count="directory")` 업로드. 업로드가 비어 있으면 Tab 1 업로드 파일 자동 상속
 - zone 오버레이 로직은 `_render_zones()` 헬퍼로 추출 — 비디오/폴더 루프 공유
 - YOLO 모델 경로 미입력 시 `runs/detect/`에서 최신 `best.pt` 자동 탐색
 - **영역 설정 흐름**:

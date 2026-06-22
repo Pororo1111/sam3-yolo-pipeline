@@ -1,30 +1,18 @@
 import html as _html
-import tkinter as tk
-from tkinter import filedialog
-from pathlib import Path
 
 import gradio as gr
 from pipeline import extractor, labeler, dataset, trainer, inference, zone_monitor
 
 
-def _pick_folder():
-    root = tk.Tk()
-    root.withdraw()
-    root.wm_attributes("-topmost", 1)
-    path = filedialog.askdirectory(title="이미지 폴더 선택", initialdir=str(Path.cwd()))
-    root.destroy()
-    return path or ""
-
-
-def _inherit_folder(source_type, current_path, tab1_path):
-    """이미지 폴더 선택 시, 경로가 비어 있으면 Tab 1의 폴더 경로를 채운다."""
-    if source_type == "이미지 폴더" and not (current_path or "").strip():
-        return gr.update(value=tab1_path or "")
+def _inherit_folder(source_type, current_files, tab1_files):
+    """이미지 폴더 선택 시, 업로드가 비어 있으면 Tab 1의 업로드 파일을 물려받는다."""
+    if source_type == "이미지 폴더" and not current_files:
+        return gr.update(value=tab1_files or None)
     return gr.update()
 
 
-def run_capture(source_type, youtube_url, capture_fps, folder_path):
-    yield from extractor.capture(source_type, youtube_url, int(capture_fps), folder_path)
+def run_capture(source_type, youtube_url, capture_fps, folder_files):
+    yield from extractor.capture(source_type, youtube_url, int(capture_fps), folder_files)
 
 
 def run_label(prompts_str, conf):
@@ -74,15 +62,12 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
             elem_id="tab1_youtube_url",
         )
         with gr.Row(elem_id="tab1_folder_row", elem_classes=["src-hidden"]) as folder_row:
-            folder_path = gr.Textbox(
-                placeholder="C:/Users/me/my_images",
-                label="이미지 폴더 경로",
-                info="jpg, jpeg, png, bmp, webp, tiff 지원 — 하위 폴더 미포함",
-                scale=5,
+            folder_files = gr.File(
+                label="이미지 폴더 업로드 (폴더 또는 여러 파일 선택)",
+                file_count="directory",
+                type="filepath",
+                height=200,
             )
-            folder_browse_btn = gr.Button("폴더 선택", scale=1, min_width=100)
-
-        folder_browse_btn.click(fn=_pick_folder, outputs=folder_path)
 
         source_type.change(
             fn=None,
@@ -105,7 +90,7 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
 
         capture_event = cap_start_btn.click(
             fn=run_capture,
-            inputs=[source_type, youtube_url, capture_fps, folder_path],
+            inputs=[source_type, youtube_url, capture_fps, folder_files],
             outputs=[cap_preview, cap_status],
         )
         cap_stop_btn.click(
@@ -312,15 +297,12 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
             elem_id="tab5_youtube_url",
         )
         with gr.Row(elem_id="tab5_folder_row", elem_classes=["src-hidden"]) as inf_folder_row:
-            inf_folder_path = gr.Textbox(
-                placeholder="C:/Users/me/my_images",
-                label="이미지 폴더 경로",
-                info="비우면 Tab 1에서 선택한 폴더를 자동 사용",
-                scale=5,
+            inf_folder_files = gr.File(
+                label="이미지 폴더 업로드 (비우면 Tab 1 업로드 자동 사용)",
+                file_count="directory",
+                type="filepath",
+                height=200,
             )
-            inf_folder_browse_btn = gr.Button("폴더 선택", scale=1, min_width=100)
-
-        inf_folder_browse_btn.click(fn=_pick_folder, outputs=inf_folder_path)
 
         inf_source_type.change(
             fn=None,
@@ -335,8 +317,8 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
         )
         inf_source_type.change(
             fn=_inherit_folder,
-            inputs=[inf_source_type, inf_folder_path, folder_path],
-            outputs=inf_folder_path,
+            inputs=[inf_source_type, inf_folder_files, folder_files],
+            outputs=inf_folder_files,
             show_progress="hidden",
         )
 
@@ -349,7 +331,7 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
 
         inf_event = inf_start_btn.click(
             fn=inference.predict,
-            inputs=[inf_model_path, inf_source_type, inf_youtube_url, inf_conf, inf_skip, inf_folder_path],
+            inputs=[inf_model_path, inf_source_type, inf_youtube_url, inf_conf, inf_skip, inf_folder_files],
             outputs=[inf_preview, inf_status],
         )
         inf_stop_btn.click(
@@ -390,15 +372,12 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
             elem_id="tab6_youtube_url",
         )
         with gr.Row(elem_id="tab6_folder_row", elem_classes=["src-hidden"]) as zm_folder_row:
-            zm_folder_path = gr.Textbox(
-                placeholder="C:/Users/me/my_images",
-                label="이미지 폴더 경로",
-                info="비우면 Tab 1에서 선택한 폴더를 자동 사용",
-                scale=5,
+            zm_folder_files = gr.File(
+                label="이미지 폴더 업로드 (비우면 Tab 1 업로드 자동 사용)",
+                file_count="directory",
+                type="filepath",
+                height=200,
             )
-            zm_folder_browse_btn = gr.Button("폴더 선택", scale=1, min_width=100)
-
-        zm_folder_browse_btn.click(fn=_pick_folder, outputs=zm_folder_path)
 
         zm_source_type.change(
             fn=None,
@@ -413,8 +392,8 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
         )
         zm_source_type.change(
             fn=_inherit_folder,
-            inputs=[zm_source_type, zm_folder_path, folder_path],
-            outputs=zm_folder_path,
+            inputs=[zm_source_type, zm_folder_files, folder_files],
+            outputs=zm_folder_files,
             show_progress="hidden",
         )
 
@@ -448,7 +427,7 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
 
         zm_stream_event = zm_start_btn.click(
             fn=zone_monitor.stream,
-            inputs=[zm_source_type, zm_youtube_url, zm_model_path, zm_conf, zm_skip, zm_folder_path],
+            inputs=[zm_source_type, zm_youtube_url, zm_model_path, zm_conf, zm_skip, zm_folder_files],
             outputs=[zm_preview, zm_stream_status],
         )
         zm_stop_btn.click(
