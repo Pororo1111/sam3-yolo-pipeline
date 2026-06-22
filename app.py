@@ -26,6 +26,11 @@ def run_label(prompts_str, conf):
     yield from labeler.label(prompts_str, float(conf))
 
 
+def on_gallery_select(prompts_str, filter_empty, evt: gr.SelectData):
+    """갤러리 선택 이벤트 래퍼 — SelectData 어노테이션으로 evt 주입을 명시."""
+    return dataset.select_frame(prompts_str, filter_empty, evt)
+
+
 def run_label_preview(prompts_str, conf, n_preview):
     yield from labeler.preview(prompts_str, float(conf), int(n_preview))
 
@@ -68,7 +73,7 @@ NAV_STEPS = [
     "침입 감지",
 ]
 
-with gr.Blocks(title="YOLO 파이프라인", theme=gr.themes.Default(), css=_CSS) as demo:
+with gr.Blocks(title="YOLO 파이프라인") as demo:
 
     # ── 사이드바 (PC: 고정 / 모바일: 토글 드로어) ────────────────
     with gr.Sidebar(width=260):
@@ -287,7 +292,7 @@ with gr.Blocks(title="YOLO 파이프라인", theme=gr.themes.Default(), css=_CSS
                 delete_btn = gr.Button("🗑 선택한 이미지 삭제", variant="stop")
 
         ds_gallery.select(
-            fn=dataset.select_frame,
+            fn=on_gallery_select,
             inputs=[ds_prompts, filter_empty_chk],
             outputs=[ds_detail, selected_stem_state, delete_status],
         )
@@ -570,4 +575,4 @@ with gr.Blocks(title="YOLO 파이프라인", theme=gr.themes.Default(), css=_CSS
 
 
 if __name__ == "__main__":
-    demo.queue().launch()
+    demo.queue().launch(theme=gr.themes.Default(), css=_CSS)
