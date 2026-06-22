@@ -2,6 +2,7 @@ import shutil
 import random
 import cv2
 import numpy as np
+import yaml
 from pathlib import Path
 
 FRAMES_DIR  = Path("dataset/raw_frames")
@@ -88,26 +89,63 @@ def load_preview(prompts_str: str, filter_empty: bool):
     return gallery, stats
 
 
-def scan_class_ids() -> str:
-    """labels/ 폴더의 txt 파일을 스캔해 클래스 ID별 객체 수를 반환."""
-    label_files = list(LABELS_DIR.glob("*.txt"))
-    if not label_files:
-        return "라벨 파일이 없습니다. Tab 2에서 오토라벨링을 먼저 실행하세요."
+def _read_yaml_names() -> dict[int, str]:
+    """기존 dataset.yaml 의 names 매핑을 읽어 {id: name} 으로 반환."""
+    if not YAML_PATH.exists():
+        return {}
+    try:
+        data = yaml.safe_load(YAML_PATH.read_text(encoding="utf-8")) or {}
+        names = data.get("names", {})
+        if isinstance(names, list):
+            return {i: str(n) for i, n in enumerate(names)}
+        if isinstance(names, dict):
+            return {int(k): str(v) for k, v in names.items()}
+    except Exception:
+        pass
+    return {}
 
+
+def _count_class_ids() -> dict[int, int]:
+    """labels/ 최상위 txt 를 스캔해 {class_id: 객체 수} 반환."""
     counts: dict[int, int] = {}
-    for lf in label_files:
+    for lf in LABELS_DIR.glob("*.txt"):
         for line in lf.read_text().strip().splitlines():
             parts = line.split()
             if len(parts) == 5:
                 cid = int(parts[0])
                 counts[cid] = counts.get(cid, 0) + 1
+    return counts
 
+
+def scan_classes(current_prompts: str = "", label_prompts: str = "") -> list[dict]:
+    """labels/ 를 스캔해 클래스 목록을 [{id, name, count}] 형태로 반환.
+
+    이름 우선순위:
+      1) Tab 3 에서 이미 편집한 이름(current_prompts)  — 사용자의 수정 보존
+      2) Tab 2 오토라벨링 프롬프트(label_prompts)        — SAM3 프롬프트 순서 = 클래스 ID
+      3) 기존 dataset.yaml 의 names
+      4) class_{id}
+    """
+    counts = _count_class_ids()
     if not counts:
-        return "라벨된 객체가 없습니다."
+        return []
 
-    lines = [f"ID {cid}: {cnt}개 객체" for cid, cnt in sorted(counts.items())]
-    lines.append("→ 위 순서(ID 0, 1, 2…)에 맞춰 클래스 프롬프트를 입력하세요.")
-    return "\n".join(lines)
+    cur = [p.strip() for p in current_prompts.split(",") if p.strip()]
+    lab = [p.strip() for p in label_prompts.split(",") if p.strip()]
+    yaml_names = _read_yaml_names()
+
+    classes = []
+    for cid in sorted(counts):
+        if cid < len(cur):
+            name = cur[cid]
+        elif cid < len(lab):
+            name = lab[cid]
+        elif cid in yaml_names:
+            name = yaml_names[cid]
+        else:
+            name = f"class_{cid}"
+        classes.append({"id": cid, "name": name, "count": counts[cid]})
+    return classes
 
 
 def select_frame(prompts_str: str, evt):

@@ -113,12 +113,16 @@ cls_ids = results[0].boxes.cls.cpu().numpy().astype(int)
 ### Tab 3 — 데이터셋 검토 & 구성 (완료)
 **파일**: `pipeline/dataset.py`
 
+- **클래스 편집기 (리스트형)**: 탭 진입/「클래스 불러오기」 시 `scan_classes()`로 라벨을 스캔해 **클래스별 행(ID · 객체 수 + 즉시 수정 가능한 이름 입력칸)** 을 `@gr.render`로 동적 생성 → 가독성·편의성 향상
+  - 이름 우선순위: ① Tab 3에서 편집한 이름(편집 보존) → ② Tab 2 오토라벨링 프롬프트(SAM3 프롬프트 순서 = 클래스 ID) → ③ 기존 `dataset.yaml` names → ④ `class_{id}`
+  - 이름 칸 수정 시 `.change`로 **즉시** 「최종 클래스 이름」(`ds_prompts`, ID 0,1,2… 순서 쉼표 결합)에 반영. 이름 수정은 render 트리거 state(`ds_class_state`)를 건드리지 않아 **리렌더/포커스 유실 없음**
+  - `_count_class_ids()`는 `labels/*.txt` 최상위만 스캔(`train/`·`val/` 하위 제외)
 - `load_preview(prompts_str, filter_empty)`: raw_frames + labels 매칭 → bbox 오버레이 Gallery 표시
 - 통계: 전체 / 라벨 있음 / 라벨 없음 프레임 수
 - "라벨 없는 프레임 제외" 체크박스로 불량 데이터 필터링
 - `build_dataset(prompts_str, val_ratio, filter_empty)`: train/val 분할 후 복사
 - 분할 전 `images/train|val`, `labels/train|val`을 `shutil.rmtree`로 정리 → 재실행 시 데이터 누적 및 같은 프레임이 train/val 양쪽에 섞이는 누수 방지
-- `dataset/dataset.yaml` 자동 생성 (클래스명은 프롬프트에서 자동 설정)
+- `dataset/dataset.yaml` 자동 생성 (클래스명은 최종 클래스 이름에서 자동 설정)
 
 ### Tab 4 — YOLO 학습 (완료)
 **파일**: `pipeline/trainer.py`

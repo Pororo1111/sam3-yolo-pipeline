@@ -15,6 +15,13 @@ def run_capture(source_type, youtube_url, capture_fps, folder_files):
     yield from extractor.capture(source_type, youtube_url, int(capture_fps), folder_files)
 
 
+def load_classes(current_prompts, label_prompts):
+    """라벨에서 클래스 목록을 스캔해 (class_state, 최종 클래스 이름 문자열) 반환."""
+    classes = dataset.scan_classes(current_prompts or "", label_prompts or "")
+    joined = ", ".join(c["name"] for c in classes)
+    return classes, joined
+
+
 def run_label(prompts_str, conf):
     yield from labeler.label(prompts_str, float(conf))
 
@@ -36,7 +43,10 @@ def run_train(epochs, imgsz, batch, lr0, device):
         yield f'<div style="{_WRAP_STYLE}"><pre style="{_PRE_STYLE}">{escaped}</pre></div>'
 
 
-_HIDE_CSS = ".src-hidden { display: none !important; }"
+_HIDE_CSS = (
+    ".src-hidden { display: none !important; }"
+    ".cls-name-box input { font-weight:600; }"
+)
 
 with gr.Blocks(title="YOLO 파이프라인") as demo:
 
@@ -134,14 +144,49 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
     with gr.Tab("3. 데이터셋 구성") as tab3:
         gr.Markdown("### 라벨링 결과 검토 후 train/val 분할")
 
-        cls_info = gr.Textbox(
-            label="현재 라벨 클래스 현황 (ID → 개수)",
-            interactive=False,
-            lines=3,
+        gr.Markdown(
+            "#### 클래스 목록 — 이름을 클릭해 바로 수정하세요\n"
+            "라벨에서 감지된 클래스 ID와 객체 수입니다. 각 이름 칸을 수정하면 "
+            "아래 **최종 클래스 이름**에 즉시 반영됩니다."
         )
+
+        ds_class_state = gr.State([])
+
+        load_classes_btn = gr.Button("클래스 불러오기 / 새로고침", variant="secondary")
+
+        @gr.render(inputs=ds_class_state)
+        def _render_class_editor(classes):
+            if not classes:
+                gr.Markdown(
+                    "_「클래스 불러오기」를 누르면 라벨에서 감지된 클래스 목록이 표시됩니다. "
+                    "(Tab 2 오토라벨링을 먼저 실행하세요.)_"
+                )
+                return
+
+            name_boxes = []
+            for c in classes:
+                with gr.Row(equal_height=True):
+                    gr.Markdown(f"**ID {c['id']}** · {c['count']}개 객체")
+                    nb = gr.Textbox(
+                        value=c["name"],
+                        show_label=False,
+                        container=False,
+                        scale=3,
+                        elem_classes=["cls-name-box"],
+                    )
+                name_boxes.append(nb)
+
+            def _sync(*names):
+                # ID 순서대로 이름을 모아 최종 클래스 이름 문자열 생성
+                return ", ".join((n or "").strip() for n in names)
+
+            # 어느 칸을 수정해도 즉시 최종 클래스 이름에 반영 (state 미변경 → 리렌더/포커스 유실 없음)
+            for nb in name_boxes:
+                nb.change(_sync, inputs=name_boxes, outputs=ds_prompts)
+
         ds_prompts = gr.Textbox(
-            placeholder="person, car, bicycle",
-            label="클래스 프롬프트 (위 ID 순서에 맞게 입력)",
+            label="최종 클래스 이름 (ID 0,1,2… 순서 · 자동 반영, 직접 수정도 가능)",
+            placeholder="위에서 클래스를 불러오면 자동으로 채워집니다.",
         )
 
         with gr.Row():
@@ -204,7 +249,16 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
             outputs=build_status,
         )
 
-        tab3.select(fn=dataset.scan_class_ids, outputs=[cls_info])
+        load_classes_btn.click(
+            fn=load_classes,
+            inputs=[ds_prompts, prompts_input],
+            outputs=[ds_class_state, ds_prompts],
+        )
+        tab3.select(
+            fn=load_classes,
+            inputs=[ds_prompts, prompts_input],
+            outputs=[ds_class_state, ds_prompts],
+        )
 
     # ── Tab 4: YOLO 학습 ────────────────────────────────────────
     with gr.Tab("4. YOLO 학습"):
