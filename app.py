@@ -43,15 +43,43 @@ def run_train(epochs, imgsz, batch, lr0, device):
         yield f'<div style="{_WRAP_STYLE}"><pre style="{_PRE_STYLE}">{escaped}</pre></div>'
 
 
-_HIDE_CSS = (
+_CSS = (
     ".src-hidden { display: none !important; }"
     ".cls-name-box input { font-weight:600; }"
+    # 사이드바 내비게이션 — 세로 풀폭 버튼 형태
+    "#pipeline_nav .wrap { flex-direction: column !important; "
+    "align-items: stretch !important; gap: 6px !important; }"
+    "#pipeline_nav label { width: 100% !important; margin: 0 !important; }"
+    # 본문 패널이 좁은 화면에서도 넘치지 않도록
+    ".main-panel { max-width: 1100px; margin: 0 auto; width: 100%; }"
 )
 
-with gr.Blocks(title="YOLO 파이프라인") as demo:
+# 사이드바 내비게이션 단계 (파이프라인 순서) — 표시 이름에서 번호 제거
+NAV_STEPS = [
+    "프레임 추출",
+    "SAM3 오토라벨링",
+    "데이터셋 구성",
+    "YOLO 학습",
+    "추론",
+    "침입 감지",
+]
 
-    # ── Tab 1: 프레임 추출 ──────────────────────────────────────
-    with gr.Tab("1. 프레임 추출"):
+with gr.Blocks(title="YOLO 파이프라인", theme=gr.themes.Default(), css=_CSS) as demo:
+
+    # ── 사이드바 (PC: 고정 / 모바일: 토글 드로어) ────────────────
+    with gr.Sidebar(width=260):
+        gr.Markdown("## 🦾 YOLO 파이프라인")
+        gr.Markdown("컴퓨터 비전 학습·추론 end-to-end 파이프라인")
+        nav = gr.Radio(
+            choices=NAV_STEPS,
+            value=NAV_STEPS[0],
+            show_label=False,
+            container=False,
+            elem_id="pipeline_nav",
+        )
+
+    # ── 프레임 추출 ──────────────────────────────────────
+    with gr.Column(visible=True, elem_classes=["main-panel"]) as panel_extract:
         gr.Markdown("### 소스 선택 & 프레임 추출 (중지 버튼으로 종료)")
 
         with gr.Row():
@@ -108,8 +136,8 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
             cancels=[capture_event],
         )
 
-    # ── Tab 2: SAM3 오토라벨링 ──────────────────────────────────
-    with gr.Tab("2. SAM3 오토라벨링"):
+    # ── SAM3 오토라벨링 ──────────────────────────────────
+    with gr.Column(visible=False, elem_classes=["main-panel"]) as panel_label:
         gr.Markdown("### SAM3 텍스트 프롬프트로 자동 라벨링")
 
         prompts_input = gr.Textbox(
@@ -140,8 +168,8 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
         )
 
 
-    # ── Tab 3: 데이터셋 검토 & 구성 ────────────────────────────────
-    with gr.Tab("3. 데이터셋 구성") as tab3:
+    # ── 데이터셋 검토 & 구성 ────────────────────────────────
+    with gr.Column(visible=False, elem_classes=["main-panel"]) as panel_dataset:
         gr.Markdown("### 라벨링 결과 검토 후 train/val 분할")
 
         gr.Markdown(
@@ -254,14 +282,9 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
             inputs=[ds_prompts, prompts_input],
             outputs=[ds_class_state, ds_prompts],
         )
-        tab3.select(
-            fn=load_classes,
-            inputs=[ds_prompts, prompts_input],
-            outputs=[ds_class_state, ds_prompts],
-        )
 
-    # ── Tab 4: YOLO 학습 ────────────────────────────────────────
-    with gr.Tab("4. YOLO 학습"):
+    # ── YOLO 학습 ────────────────────────────────────────
+    with gr.Column(visible=False, elem_classes=["main-panel"]) as panel_train:
         gr.Markdown("### YOLO 모델 학습")
         gr.Markdown(
             "> **파라미터 안내** — 아래 값은 ultralytics 기본값 기준이며 최적화된 값이 아닙니다. "
@@ -319,8 +342,8 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
             cancels=[train_event],
         )
 
-    # ── Tab 5: 추론 ─────────────────────────────────────────────
-    with gr.Tab("5. 추론"):
+    # ── 추론 ─────────────────────────────────────────────
+    with gr.Column(visible=False, elem_classes=["main-panel"]) as panel_infer:
         gr.Markdown("### 학습된 모델로 실시간 추론")
 
         inf_model_path = gr.Textbox(
@@ -394,8 +417,8 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
         )
 
 
-    # ── Tab 6: 침입 감지 ────────────────────────────────────────
-    with gr.Tab("6. 침입 감지"):
+    # ── 침입 감지 ────────────────────────────────────────
+    with gr.Column(visible=False, elem_classes=["main-panel"]) as panel_zone:
         gr.Markdown("### 로컬 LLM 영역 설정 & 실시간 침입 감지")
 
         zm_model_path = gr.Textbox(
@@ -494,6 +517,27 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
             outputs=[zm_zone_status, zm_llm_log],
         )
 
+    # ── 사이드바 내비게이션 → 패널 전환 ──────────────────────────
+    _PANELS = [panel_extract, panel_label, panel_dataset,
+               panel_train, panel_infer, panel_zone]
+
+    def _switch_panel(choice):
+        return [gr.update(visible=(step == choice)) for step in NAV_STEPS]
+
+    nav.change(_switch_panel, inputs=nav, outputs=_PANELS)
+
+    def _maybe_load_classes(choice, current_prompts, label_prompts):
+        """데이터셋 단계로 진입할 때만 클래스 목록 자동 로드."""
+        if choice != "데이터셋 구성":
+            return gr.update(), gr.update()
+        return load_classes(current_prompts, label_prompts)
+
+    nav.change(
+        _maybe_load_classes,
+        inputs=[nav, ds_prompts, prompts_input],
+        outputs=[ds_class_state, ds_prompts],
+    )
+
 
 if __name__ == "__main__":
-    demo.queue().launch(theme=gr.themes.Default(), css=_HIDE_CSS)
+    demo.queue().launch()
