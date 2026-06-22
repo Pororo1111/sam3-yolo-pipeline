@@ -120,7 +120,7 @@ def stream(source_type: str, youtube_url: str, model_path: str, conf: float,
     _stop_event.clear()
 
     # YOLO 모델 로딩
-    if not model_path.strip():
+    if not (model_path or "").strip():
         model_path = _find_best_pt()
     if model_path is None or not Path(model_path).exists():
         yield None, f"모델 파일을 찾을 수 없습니다: {model_path}"

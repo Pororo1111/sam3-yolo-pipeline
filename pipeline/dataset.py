@@ -112,19 +112,26 @@ def _read_yaml_names() -> dict[int, str]:
 
 
 def _count_class_ids() -> dict[int, int]:
-    """labels/ 최상위 txt 를 스캔해 {class_id: 객체 수} 반환."""
+    """labels/ 최상위 txt 를 스캔해 {class_id: 해당 클래스가 들어있는 프레임 수} 반환.
+
+    같은 프레임에 같은 클래스가 여러 개 있어도 1로 센다(프레임 단위 집계).
+    """
     counts: dict[int, int] = {}
     for lf in LABELS_DIR.glob("*.txt"):
+        ids_in_frame = set()
         for line in lf.read_text().strip().splitlines():
             parts = line.split()
             if len(parts) == 5:
-                cid = int(parts[0])
-                counts[cid] = counts.get(cid, 0) + 1
+                ids_in_frame.add(int(parts[0]))
+        for cid in ids_in_frame:
+            counts[cid] = counts.get(cid, 0) + 1
     return counts
 
 
 def scan_classes(label_prompts: str = "") -> list[dict]:
     """labels/ 를 스캔해 클래스 목록을 [{id, name, count}] 형태로 반환.
+
+    count 는 해당 클래스가 들어있는 프레임(이미지) 수.
 
     이름 우선순위 (최신 라벨링 결과를 항상 우선):
       1) Tab 2 오토라벨링 프롬프트(label_prompts) — SAM3 프롬프트 순서 = 클래스 ID

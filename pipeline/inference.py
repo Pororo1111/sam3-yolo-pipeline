@@ -65,10 +65,10 @@ def predict(model_path: str, source_type: str, youtube_url: str,
     """
     _stop_event.clear()
 
-    if not model_path.strip():
+    if not (model_path or "").strip():
         model_path = _find_best_pt()
         if model_path is None:
-            yield None, "best.pt를 찾을 수 없습니다. 먼저 Tab 4에서 학습을 완료하거나 경로를 직접 입력하세요."
+            yield None, "학습된 모델이 없습니다. 먼저 학습 탭에서 학습을 완료하세요."
             return
 
     if not Path(model_path).exists():

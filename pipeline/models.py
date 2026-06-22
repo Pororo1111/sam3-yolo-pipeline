@@ -5,10 +5,12 @@
 """
 
 import shutil
+from datetime import datetime
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parent.parent
 MODELS_DIR = _ROOT / "models"
+RUNS_DIR = _ROOT / "runs" / "detect"
 
 # (파일명, ultralytics 에셋에서 자동 다운로드 가능 여부)
 _AUTO_DOWNLOAD = ["yolo26n.pt"]
@@ -57,3 +59,24 @@ def ensure_models() -> None:
     """앱 시작 시 호출 — 자동 다운로드 대상 모델을 모두 확인/설치한다."""
     for name in _AUTO_DOWNLOAD:
         ensure_yolo_model(name)
+
+
+def list_trained_models() -> list[tuple[str, str]]:
+    """`runs/detect/*/weights/best.pt` 학습 완료 모델 목록을 (표시이름, 경로)로 반환.
+
+    표시이름은 "<run 폴더명>  (YYYY-MM-DD HH:MM)" 형태이며 생성(수정) 날짜를 포함.
+    최신 학습 순(날짜 내림차순)으로 정렬 → 드롭다운 첫 항목이 가장 최근 모델.
+    Gradio Dropdown 의 choices 로 그대로 사용 가능.
+    """
+    items: list[tuple[float, str, str]] = []
+    for p in RUNS_DIR.glob("*/weights/best.pt"):
+        try:
+            mtime = p.stat().st_mtime
+        except OSError:
+            continue
+        date_str = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+        run_name = p.parent.parent.name  # runs/detect/<run_name>/weights/best.pt
+        items.append((mtime, f"{run_name}  ({date_str})", str(p)))
+
+    items.sort(key=lambda x: x[0], reverse=True)
+    return [(label, path) for _, label, path in items]

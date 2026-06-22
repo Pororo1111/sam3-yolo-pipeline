@@ -1,5 +1,6 @@
 import threading
 import shutil
+import time
 import cv2
 import numpy as np
 import yt_dlp
@@ -10,10 +11,18 @@ OUT_DIR = Path("dataset/raw_frames")
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tiff", ".tif"}
 
 _stop_event = threading.Event()
+_saved_count = 0  # 현재 캡처 세션에서 저장한 장수 (중지 시 최종 메시지에 사용)
 
 
 def stop():
+    """중지 요청 + 최종 상태 문자열 반환.
+
+    중지 버튼은 `cancels`로 캡처 제너레이터를 강제 종료하므로 제너레이터
+    내부의 마지막 yield(완료 메시지)가 실행되지 못한다. 따라서 중지 버튼이
+    직접 상태창을 갱신하도록 여기서 최종 메시지를 반환한다.
+    """
     _stop_event.set()
+    return f"중지됨 — {_saved_count}장 저장 완료  →  {OUT_DIR.resolve()}"
 
 
 def _get_youtube_stream_url(url: str) -> str:
@@ -40,7 +49,9 @@ def capture(source_type: str, youtube_url: str, capture_fps: int, folder_files=N
     source_type: "YouTube URL" | "웹캠" | "이미지 폴더"
     folder_files: 이미지 폴더 모드에서 gr.File 업로드 결과(파일 경로 리스트).
     """
+    global _saved_count
     _stop_event.clear()
+    _saved_count = 0
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
     # 기존 프레임 삭제
@@ -80,6 +91,10 @@ def capture(source_type: str, youtube_url: str, capture_fps: int, folder_files=N
 
     frame_idx = 0
     saved = 0
+    # 미리보기 yield 를 15fps 로 제한 — 다운로드 영상은 cap.read()가 즉시 반환돼
+    # 루프가 폭주하면 제너레이터 출력이 버퍼링되어 실시간 갱신이 안 된다(추론 탭과 동일 패턴).
+    display_interval = 1.0 / 15
+    last_yield = 0.0
 
     while True:
         if _stop_event.is_set():
@@ -93,9 +108,13 @@ def capture(source_type: str, youtube_url: str, capture_fps: int, folder_files=N
             path = OUT_DIR / f"frame_{saved:05d}.jpg"
             cv2.imwrite(str(path), frame)
             saved += 1
+            _saved_count = saved
 
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            yield rgb, f"{saved}장 저장 중..."
+            now = time.perf_counter()
+            if now - last_yield >= display_interval:
+                last_yield = now
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                yield rgb, f"{saved}장 저장 중..."
 
         frame_idx += 1
 
@@ -128,6 +147,7 @@ def _filter_image_paths(files) -> "list[Path]":
 
 def _import_from_files(files):
     """gr.File 업로드된 이미지 파일들을 raw_frames로 복사."""
+    global _saved_count
     images = _filter_image_paths(files)
 
     if not files:
@@ -156,6 +176,7 @@ def _import_from_files(files):
                 continue
             cv2.imwrite(str(dst_path), bgr)
             copied += 1
+            _saved_count = copied
             rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
             yield rgb, f"{copied} / {total} 복사 완료"
         except Exception as e:
