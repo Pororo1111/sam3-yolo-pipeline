@@ -135,6 +135,9 @@ cls_ids = results[0].boxes.cls.cpu().numpy().astype(int)
 - `load_preview(prompts_str, filter_empty)`: raw_frames + labels 매칭 → bbox 오버레이 Gallery 표시
 - 통계: 전체 / 라벨 있음 / 라벨 없음 프레임 수
 - "라벨 없는 프레임 제외" 체크박스로 불량 데이터 필터링
+- **갤러리 이미지 개별 삭제**: 갤러리 클릭 → `select_frame()`이 상세 보기 + 파일명 표시 → 「선택한 이미지 삭제」 → `delete_frame()`이 이미지+라벨 삭제 후 갤러리/통계 갱신
+  - 선택은 캡션 파싱이 아니라 **`evt.index` → `_gallery_frames(filter_empty)` 매핑**으로 식별 → Gradio 버전별 `SelectData` 포맷 차이/빈프레임 필터 상태와 무관하게 정확
+  - `_gallery_frames()`는 `load_preview` 갤러리와 동일 순서(정렬 + filter_empty 적용)를 보장
 - `build_dataset(prompts_str, val_ratio, filter_empty)`: train/val 분할 후 복사
 - 분할 전 `images/train|val`, `labels/train|val`을 `shutil.rmtree`로 정리 → 재실행 시 데이터 누적 및 같은 프레임이 train/val 양쪽에 섞이는 누수 방지
 - `dataset/dataset.yaml` 자동 생성 (클래스명은 최종 클래스 이름에서 자동 설정)

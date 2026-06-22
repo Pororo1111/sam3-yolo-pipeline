@@ -257,7 +257,7 @@ with gr.Blocks(title="YOLO 파이프라인", theme=gr.themes.Default(), css=_CSS
         preview_btn = gr.Button("라벨 미리보기 로드", variant="secondary")
         ds_stats    = gr.Textbox(label="통계", interactive=False)
         ds_gallery  = gr.Gallery(
-            label="프레임별 라벨 확인 (클릭하면 상세 보기)",
+            label="프레임별 라벨 확인 — 이미지를 클릭하면 우측 상세 보기 + 삭제 가능",
             columns=4,
             height=500,
             object_fit="contain",
@@ -270,22 +270,25 @@ with gr.Blocks(title="YOLO 파이프라인", theme=gr.themes.Default(), css=_CSS
         )
 
         # ── 상세 보기 & 삭제 ────────────────────────────────────────
+        selected_stem_state = gr.State(value="")
         with gr.Row():
             ds_detail = gr.Image(
-                label="상세 보기",
+                label="선택한 이미지 상세 보기",
                 type="numpy",
                 interactive=False,
                 visible=True,
                 height=400,
+                scale=2,
             )
-        selected_stem_state = gr.State(value="")
-        with gr.Row():
-            delete_btn    = gr.Button("이 이미지 삭제", variant="stop")
-            delete_status = gr.Textbox(label="삭제 결과", interactive=False, scale=3)
+            with gr.Column(scale=1):
+                delete_status = gr.Textbox(
+                    label="선택 / 삭제 상태", interactive=False, lines=3,
+                )
+                delete_btn = gr.Button("🗑 선택한 이미지 삭제", variant="stop")
 
         ds_gallery.select(
             fn=dataset.select_frame,
-            inputs=[ds_prompts],
+            inputs=[ds_prompts, filter_empty_chk],
             outputs=[ds_detail, selected_stem_state, delete_status],
         )
         delete_btn.click(
