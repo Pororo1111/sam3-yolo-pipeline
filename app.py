@@ -1,7 +1,7 @@
 import html as _html
 
 import gradio as gr
-from pipeline import extractor, labeler, dataset, trainer, inference, zone_monitor
+from pipeline import extractor, labeler, dataset, trainer, inference, zone_monitor, models
 
 
 def _inherit_folder(source_type, current_files, tab1_files):
@@ -590,4 +590,6 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
 
 
 if __name__ == "__main__":
+    # 시작 시 학습용 베이스 모델(yolo26n.pt)이 models/ 에 없으면 자동 다운로드
+    models.ensure_models()
     demo.queue().launch(theme=gr.themes.Default(), css=_CSS)
