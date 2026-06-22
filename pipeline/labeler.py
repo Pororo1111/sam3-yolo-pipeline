@@ -44,8 +44,103 @@ def _mask_to_yolo_bbox(mask_u8: np.ndarray, img_w: int, img_h: int):
     return x_c, y_c, w, h
 
 
+def _infer_and_overlay(predictor, frame_bgr: np.ndarray, prompts: list[str]):
+    """단일 프레임 SAM3 추론 → (rgb_overlay, label_lines, n_objects).
+
+    라벨 파일은 저장하지 않는다 — 미리보기/전체 라벨링이 공유하는 순수 추론부.
+    """
+    img_h, img_w = frame_bgr.shape[:2]
+    predictor.set_image(frame_bgr)
+    results = predictor(text=prompts)
+
+    label_lines: list[str] = []
+    preview_bgr = frame_bgr.copy()
+
+    if results and results[0].masks is not None:
+        r       = results[0]
+        masks   = r.masks.data.cpu().numpy().astype(np.uint8)
+        cls_ids = (
+            r.boxes.cls.cpu().numpy().astype(int)
+            if r.boxes is not None
+            else []
+        )
+
+        for mask, cls_id in zip(masks, cls_ids):
+            mask_r = cv2.resize(mask, (img_w, img_h), interpolation=cv2.INTER_NEAREST)
+            bbox = _mask_to_yolo_bbox(mask_r, img_w, img_h)
+            if bbox is None:
+                continue
+            x_c, y_c, w, h = bbox
+            label_lines.append(f"{cls_id} {x_c:.6f} {y_c:.6f} {w:.6f} {h:.6f}")
+
+            color = _class_color(cls_id)
+            overlay = preview_bgr.copy()
+            overlay[mask_r > 0] = color
+            cv2.addWeighted(overlay, 0.4, preview_bgr, 0.6, 0, preview_bgr)
+
+    rgb = cv2.cvtColor(preview_bgr, cv2.COLOR_BGR2RGB)
+    return rgb, label_lines, len(label_lines)
+
+
+def preview(prompts_str: str, conf: float, n_preview: int):
+    """미리보기 — 전체에서 균등 샘플링한 N장만 라벨 결과를 보여준다 (저장 안 함).
+
+    Generator — yields (gallery_items, status_str)
+    gallery_items: list of (rgb_np, caption)
+    """
+    _stop_event.clear()
+
+    prompts = [p.strip() for p in prompts_str.split(",") if p.strip()]
+    if not prompts:
+        yield [], "클래스 프롬프트를 입력하세요. (예: person, car)"
+        return
+
+    frames = sorted(FRAMES_DIR.glob("frame_*.jpg"))
+    if not frames:
+        yield [], "추출된 프레임이 없습니다. 먼저 1단계에서 프레임을 추출하세요."
+        return
+
+    n = max(1, int(n_preview))
+    if len(frames) <= n:
+        sample = frames
+    else:
+        idxs = np.linspace(0, len(frames) - 1, n).astype(int)
+        sample = [frames[i] for i in sorted(set(idxs.tolist()))]
+
+    yield [], "SAM3 모델 로딩 중..."
+
+    try:
+        predictor = _get_predictor(conf)
+    except Exception as e:
+        yield [], f"모델 로딩 실패: {e}"
+        return
+
+    gallery: list = []
+    total_obj = 0
+
+    for i, frame_path in enumerate(sample):
+        if _stop_event.is_set():
+            yield gallery, f"미리보기 중지됨 — {len(gallery)}장"
+            return
+
+        frame_bgr = cv2.imread(str(frame_path))
+        if frame_bgr is None:
+            continue
+
+        rgb, _lines, n_obj = _infer_and_overlay(predictor, frame_bgr, prompts)
+        total_obj += n_obj
+        gallery.append((rgb, f"{frame_path.name} · {n_obj}개"))
+        yield gallery, f"미리보기 {i + 1}/{len(sample)}  ·  누적 {total_obj}개 객체"
+
+    yield gallery, (
+        f"미리보기 완료 — {len(gallery)}장 샘플 · 총 {total_obj}개 객체. "
+        f"결과가 괜찮으면 「전체 라벨링 시작」을 누르세요. (아직 라벨은 저장되지 않았습니다)"
+    )
+
+
 def label(prompts_str: str, conf: float):
     """
+    전체 라벨링 — 모든 프레임에 추론하고 라벨 파일을 저장한다.
     Generator — yields (rgb_preview | None, status_str)
     prompts_str: "person, car, bicycle"  (쉼표 구분)
     """
@@ -58,7 +153,7 @@ def label(prompts_str: str, conf: float):
 
     frames = sorted(FRAMES_DIR.glob("frame_*.jpg"))
     if not frames:
-        yield None, f"추출된 프레임이 없습니다. 먼저 Tab 1에서 프레임을 추출하세요."
+        yield None, f"추출된 프레임이 없습니다. 먼저 1단계에서 프레임을 추출하세요."
         return
 
     LABELS_DIR.mkdir(parents=True, exist_ok=True)
@@ -86,48 +181,15 @@ def label(prompts_str: str, conf: float):
         frame_bgr = cv2.imread(str(frame_path))
         if frame_bgr is None:
             continue
-        img_h, img_w = frame_bgr.shape[:2]
 
-        predictor.set_image(frame_bgr)
-        results = predictor(text=prompts)
-
-        label_lines = []
-
-        if results and results[0].masks is not None:
-            r       = results[0]
-            masks   = r.masks.data.cpu().numpy().astype(np.uint8)
-            cls_ids = (
-                r.boxes.cls.cpu().numpy().astype(int)
-                if r.boxes is not None
-                else []
-            )
-
-            for mask, cls_id in zip(masks, cls_ids):
-                mask_r = cv2.resize(mask, (img_w, img_h), interpolation=cv2.INTER_NEAREST)
-                bbox = _mask_to_yolo_bbox(mask_r, img_w, img_h)
-                if bbox is None:
-                    continue
-                x_c, y_c, w, h = bbox
-                label_lines.append(f"{cls_id} {x_c:.6f} {y_c:.6f} {w:.6f} {h:.6f}")
-
-            # 라벨 시각화 (첫 마스크만 오버레이)
-            preview_bgr = frame_bgr.copy()
-            for mask, cls_id in zip(masks, cls_ids):
-                mask_r = cv2.resize(mask, (img_w, img_h), interpolation=cv2.INTER_NEAREST)
-                color = _class_color(cls_id)
-                overlay = preview_bgr.copy()
-                overlay[mask_r > 0] = color
-                cv2.addWeighted(overlay, 0.4, preview_bgr, 0.6, 0, preview_bgr)
-            rgb = cv2.cvtColor(preview_bgr, cv2.COLOR_BGR2RGB)
-        else:
-            rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        rgb, label_lines, n_obj = _infer_and_overlay(predictor, frame_bgr, prompts)
 
         # 라벨 파일 저장 (마스크 없으면 빈 파일)
         label_path = LABELS_DIR / (frame_path.stem + ".txt")
         label_path.write_text("\n".join(label_lines))
 
         done += 1
-        yield rgb, f"{done} / {total}  |  {frame_path.name}  →  {len(label_lines)}개 객체"
+        yield rgb, f"{done} / {total}  |  {frame_path.name}  →  {n_obj}개 객체"
 
     if _stop_event.is_set():
         yield None, f"중지됨 — {done}/{total} 완료  →  {LABELS_DIR.resolve()}"

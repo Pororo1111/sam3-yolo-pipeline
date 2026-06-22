@@ -45,18 +45,30 @@ def _cls_color(cls_id: int) -> tuple:
     return palette[cls_id % len(palette)]
 
 
+def _filter_image_paths(files) -> "list[Path]":
+    """gr.File 업로드 결과에서 지원 형식의 이미지 경로만 정렬해 반환."""
+    if not files:
+        return []
+    paths = []
+    for f in files:
+        p = Path(getattr(f, "name", f))
+        if p.is_file() and p.suffix.lower() in _IMAGE_EXTS:
+            paths.append(p)
+    return sorted(paths, key=lambda p: p.name)
+
+
 def predict(model_path: str, source_type: str, youtube_url: str,
-            conf: float, infer_every: int, folder_path: str = ""):
+            conf: float, infer_every: int, folder_files=None):
     """
     Generator — yields (rgb_frame | None, status_str)
     infer_every: N프레임마다 1회 추론, 나머지는 마지막 bbox 재사용
     """
     _stop_event.clear()
 
-    if not model_path.strip():
+    if not (model_path or "").strip():
         model_path = _find_best_pt()
         if model_path is None:
-            yield None, "best.pt를 찾을 수 없습니다. 먼저 Tab 4에서 학습을 완료하거나 경로를 직접 입력하세요."
+            yield None, "학습된 모델이 없습니다. 먼저 학습 탭에서 학습을 완료하세요."
             return
 
     if not Path(model_path).exists():
@@ -80,7 +92,7 @@ def predict(model_path: str, source_type: str, youtube_url: str,
     names = model.names or {}
 
     if source_type == "이미지 폴더":
-        yield from _predict_folder(model, names, folder_path, conf)
+        yield from _predict_folder(model, names, folder_files, conf)
         return
 
     if source_type == "웹캠":
@@ -156,17 +168,11 @@ def predict(model_path: str, source_type: str, youtube_url: str,
     yield None, f"추론 완료 — 총 {frame_idx}프레임 처리"
 
 
-def _predict_folder(model, names: dict, folder_path: str, conf: float):
-    """이미지 폴더의 모든 이미지를 순회하며 추론 (중지 전까지 반복)."""
-    src = Path(folder_path.strip()) if folder_path and folder_path.strip() else None
-    if src is None or not src.is_dir():
-        yield None, f"이미지 폴더를 찾을 수 없습니다: {folder_path}"
-        return
-
-    images = sorted(p for p in src.iterdir()
-                    if p.is_file() and p.suffix.lower() in _IMAGE_EXTS)
+def _predict_folder(model, names: dict, folder_files, conf: float):
+    """업로드된 이미지들을 순회하며 추론 (중지 전까지 반복)."""
+    images = _filter_image_paths(folder_files)
     if not images:
-        yield None, "폴더에 이미지가 없습니다."
+        yield None, "업로드된 이미지가 없습니다. 이미지 폴더를 업로드하세요."
         return
 
     yield None, f"이미지 폴더 추론 시작 — {len(images)}장"

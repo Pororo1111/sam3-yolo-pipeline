@@ -18,6 +18,18 @@ def _find_best_pt() -> str | None:
     return str(candidates[-1]) if candidates else None
 
 
+def _filter_image_paths(files) -> "list[Path]":
+    """gr.File 업로드 결과에서 지원 형식의 이미지 경로만 정렬해 반환."""
+    if not files:
+        return []
+    paths = []
+    for f in files:
+        p = Path(getattr(f, "name", f))
+        if p.is_file() and p.suffix.lower() in _IMAGE_EXTS:
+            paths.append(p)
+    return sorted(paths, key=lambda p: p.name)
+
+
 def _count_objects_in_zone(boxes, polygon: np.ndarray) -> int:
     count = 0
     for box in boxes:
@@ -103,12 +115,12 @@ def _resolve_source(source_type: str, youtube_url: str):
 
 
 def stream(source_type: str, youtube_url: str, model_path: str, conf: float,
-           infer_every: int, folder_path: str = ""):
+           infer_every: int, folder_files=None):
     global _last_frame
     _stop_event.clear()
 
     # YOLO 모델 로딩
-    if not model_path.strip():
+    if not (model_path or "").strip():
         model_path = _find_best_pt()
     if model_path is None or not Path(model_path).exists():
         yield None, f"모델 파일을 찾을 수 없습니다: {model_path}"
@@ -124,7 +136,7 @@ def stream(source_type: str, youtube_url: str, model_path: str, conf: float,
     names = model.names or {}
 
     if source_type == "이미지 폴더":
-        yield from _stream_folder(model, names, folder_path, conf)
+        yield from _stream_folder(model, names, folder_files, conf)
         return
 
     cap_source, err = _resolve_source(source_type, youtube_url)
@@ -190,19 +202,13 @@ def stream(source_type: str, youtube_url: str, model_path: str, conf: float,
     yield None, "스트림 종료"
 
 
-def _stream_folder(model, names: dict, folder_path: str, conf: float):
-    """이미지 폴더를 순회하며 zone 감시 (중지 전까지 반복)."""
+def _stream_folder(model, names: dict, folder_files, conf: float):
+    """업로드된 이미지들을 순회하며 zone 감시 (중지 전까지 반복)."""
     global _last_frame
 
-    src = Path(folder_path.strip()) if folder_path and folder_path.strip() else None
-    if src is None or not src.is_dir():
-        yield None, f"이미지 폴더를 찾을 수 없습니다: {folder_path}"
-        return
-
-    images = sorted(p for p in src.iterdir()
-                    if p.is_file() and p.suffix.lower() in _IMAGE_EXTS)
+    images = _filter_image_paths(folder_files)
     if not images:
-        yield None, "폴더에 이미지가 없습니다."
+        yield None, "업로드된 이미지가 없습니다. 이미지 폴더를 업로드하세요."
         return
 
     yield None, f"이미지 폴더 감시 시작 — {len(images)}장 (영역 설정 후 침입 판별)"

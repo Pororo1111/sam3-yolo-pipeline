@@ -14,9 +14,16 @@ def _clean(text: str) -> str:
     return text
 
 
+def _safe_name(name: str) -> str:
+    """학습 결과 폴더명으로 안전한 문자열 반환 (경로 구분자/금지문자 제거, 빈값은 train)."""
+    name = (name or "").strip()
+    name = re.sub(r'[<>:"/\\|?*]', "_", name)
+    return name or "train"
+
+
 _ROOT     = Path(__file__).resolve().parent.parent
 YAML_PATH = _ROOT / "dataset/dataset.yaml"
-BEST_PT   = _ROOT / "runs/detect/train/weights/best.pt"
+_PROJECT  = _ROOT / "runs" / "detect"
 _MODEL_PT = _ROOT / "models/yolo26n.pt"
 
 _stop_event = threading.Event()
@@ -26,8 +33,11 @@ def stop():
     _stop_event.set()
 
 
-def train(epochs: int, imgsz: int, batch: int, lr0: float, device: str):
+def train(epochs: int, imgsz: int, batch: int, lr0: float, device: str,
+          name: str = "train", base_model: str = ""):
     _stop_event.clear()
+
+    run_name = _safe_name(name)
 
     if not YAML_PATH.exists():
         yield f"dataset.yaml 없음 — 먼저 Tab 3에서 데이터셋을 구성하세요.\n경로: {YAML_PATH.resolve()}"
@@ -39,14 +49,23 @@ def train(epochs: int, imgsz: int, batch: int, lr0: float, device: str):
         yield "ultralytics 패키지를 찾을 수 없습니다."
         return
 
-    if not _MODEL_PT.exists():
-        yield f"모델 파일 없음: {_MODEL_PT}\nmodels/ 폴더에 yolo26n.pt를 배치하세요.\n"
-        return
+    # 베이스 가중치 결정 — 지정 시 그 위에 이어학습(파인튜닝), 비우면 사전학습 yolo26n.pt
+    base = (base_model or "").strip()
+    if base:
+        base_path = Path(base)
+        if not base_path.exists():
+            yield f"베이스 모델 파일을 찾을 수 없습니다: {base_path}\n"
+            return
+    else:
+        if not _MODEL_PT.exists():
+            yield f"모델 파일 없음: {_MODEL_PT}\nmodels/ 폴더에 yolo26n.pt를 배치하세요.\n"
+            return
+        base_path = _MODEL_PT
 
-    yield f"YOLO 모델 로딩 중 ({_MODEL_PT.name})...\n"
+    yield f"YOLO 모델 로딩 중 ({base_path.name})...\n"
 
     try:
-        model = YOLO(str(_MODEL_PT))
+        model = YOLO(str(base_path))
     except Exception as e:
         yield f"모델 로딩 실패: {e}\n"
         return
@@ -54,8 +73,11 @@ def train(epochs: int, imgsz: int, batch: int, lr0: float, device: str):
     lines = []
 
     # ── 콜백 기반 로그 수집 ──────────────────────────────────────
+    save_dir_box = [None]  # 실제 결과 저장 폴더 (이름 충돌 시 ultralytics가 숫자를 붙임)
+
     def on_train_start(trainer):
-        lines.append(f"학습 시작 — 총 {trainer.epochs} 에폭")
+        save_dir_box[0] = Path(trainer.save_dir)
+        lines.append(f"학습 시작 — 총 {trainer.epochs} 에폭  (결과 폴더: {trainer.save_dir})")
 
     def on_train_epoch_end(trainer):
         if _stop_event.is_set():
@@ -106,8 +128,10 @@ def train(epochs: int, imgsz: int, batch: int, lr0: float, device: str):
     model.add_callback("on_train_end",       on_train_end)
     model.add_callback("on_val_end",         on_val_end)
 
+    base_desc = f"{base_path.name} (이어학습)" if base else f"{base_path.name} (처음부터)"
     header = (
         f"학습 시작\n"
+        f"  base={base_desc}  name={run_name}\n"
         f"  epochs={epochs}  imgsz={imgsz}  batch={batch}  lr0={lr0}  device={device}\n"
         f"  data={YAML_PATH}\n"
         + "─" * 60 + "\n"
@@ -128,6 +152,8 @@ def train(epochs: int, imgsz: int, batch: int, lr0: float, device: str):
                 batch=batch,
                 lr0=lr0,
                 device=device if device != "auto" else None,
+                project=str(_PROJECT),
+                name=run_name,
                 verbose=True,
                 plots=True,
                 workers=0,
@@ -167,11 +193,11 @@ def train(epochs: int, imgsz: int, batch: int, lr0: float, device: str):
         yield accumulated
         return
 
-    best = _ROOT / "runs/detect/train/weights/best.pt"
-    if best.exists():
+    best = (save_dir_box[0] / "weights" / "best.pt") if save_dir_box[0] else None
+    if best and best.exists():
         accumulated += f"\n학습 완료!\nbest.pt → {best.resolve()}\n"
     else:
-        candidates = sorted((_ROOT / "runs/detect").glob("*/weights/best.pt"))
+        candidates = sorted(_PROJECT.glob("*/weights/best.pt"))
         if candidates:
             accumulated += f"\n학습 완료!\nbest.pt → {candidates[-1].resolve()}\n"
         else:
