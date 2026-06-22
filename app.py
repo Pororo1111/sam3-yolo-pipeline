@@ -26,6 +26,10 @@ def run_label(prompts_str, conf):
     yield from labeler.label(prompts_str, float(conf))
 
 
+def run_label_preview(prompts_str, conf, n_preview):
+    yield from labeler.preview(prompts_str, float(conf), int(n_preview))
+
+
 _WRAP_STYLE = (
     "height:420px;overflow-y:scroll;display:flex;flex-direction:column-reverse;"
     "background:#1e1e1e;border-radius:6px;"
@@ -139,24 +143,47 @@ with gr.Blocks(title="YOLO 파이프라인", theme=gr.themes.Default(), css=_CSS
     # ── SAM3 오토라벨링 ──────────────────────────────────
     with gr.Column(visible=False, elem_classes=["main-panel"]) as panel_label:
         gr.Markdown("### SAM3 텍스트 프롬프트로 자동 라벨링")
+        gr.Markdown(
+            "프롬프트와 conf를 입력하고 **① 미리보기**로 샘플 라벨을 확인하세요. "
+            "결과가 괜찮으면 **② 전체 라벨링 시작**으로 모든 프레임에 적용합니다."
+        )
 
         prompts_input = gr.Textbox(
             placeholder="person, car, bicycle",
             label="클래스 프롬프트 (쉼표 구분)",
             value="",
         )
-        conf_slider = gr.Slider(
-            minimum=0.05, maximum=0.9, value=0.25, step=0.05,
-            label="신뢰도 임계값 (conf)",
-        )
+        with gr.Row():
+            conf_slider = gr.Slider(
+                minimum=0.05, maximum=0.9, value=0.25, step=0.05,
+                label="신뢰도 임계값 (conf)",
+            )
+            n_preview_slider = gr.Slider(
+                minimum=1, maximum=12, value=4, step=1,
+                label="미리보기 샘플 수",
+                info="전체 프레임에서 균등 샘플링해 라벨 결과를 미리 확인 (저장 안 됨)",
+            )
 
         with gr.Row():
-            label_start_btn = gr.Button("오토라벨링 시작", variant="primary")
-            label_stop_btn  = gr.Button("중지", variant="stop")
+            label_preview_btn = gr.Button("① 미리보기", variant="secondary")
+            label_start_btn   = gr.Button("② 전체 라벨링 시작", variant="primary")
+            label_stop_btn    = gr.Button("중지", variant="stop")
 
-        label_preview = gr.Image(label="라벨링 미리보기", type="numpy")
+        label_gallery = gr.Gallery(
+            label="미리보기 결과 (마스크 오버레이 · 저장 전)",
+            columns=4,
+            height=360,
+            object_fit="contain",
+        )
+
+        label_preview = gr.Image(label="전체 라벨링 진행 미리보기", type="numpy")
         label_status  = gr.Textbox(label="상태", interactive=False)
 
+        preview_event = label_preview_btn.click(
+            fn=run_label_preview,
+            inputs=[prompts_input, conf_slider, n_preview_slider],
+            outputs=[label_gallery, label_status],
+        )
         label_event = label_start_btn.click(
             fn=run_label,
             inputs=[prompts_input, conf_slider],
@@ -164,7 +191,7 @@ with gr.Blocks(title="YOLO 파이프라인", theme=gr.themes.Default(), css=_CSS
         )
         label_stop_btn.click(
             fn=labeler.stop,
-            cancels=[label_event],
+            cancels=[preview_event, label_event],
         )
 
 

@@ -105,6 +105,11 @@ yolo-webui/
 - 시작 시 `dataset/labels/`의 평면 `*.txt` 삭제 (이전 소스 오라벨이 새 이미지에 붙는 것 방지). `glob("*.txt")`는 최상위만 매칭 → `train/`·`val/` 하위 폴더는 보존
 - `conf=0.25`, `half=False`
 - 라벨링 중 마스크 오버레이 프리뷰 실시간 표시
+- **미리보기 → 전체 실행 2단계 흐름** (유저 편의성):
+  - `preview(prompts, conf, n_preview)`: 전체 프레임에서 `np.linspace`로 **균등 샘플링한 N장**만 추론해 갤러리로 표시. **라벨 파일 저장/삭제 없음** → 프롬프트·conf 튜닝 후 결과 확인용
+  - `label(prompts, conf)`: 결과가 괜찮으면 전체 프레임에 적용 + 라벨 저장 (기존 동작)
+  - 순수 추론부는 `_infer_and_overlay()` 헬퍼로 추출 → preview/label 공유 (rgb 오버레이, label_lines, 객체 수 반환)
+  - 중지 버튼은 `cancels=[preview_event, label_event]`로 두 흐름 모두 취소
 
 ```python
 # SAM3 초기화 패턴
