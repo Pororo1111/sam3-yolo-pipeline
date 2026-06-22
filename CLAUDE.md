@@ -7,18 +7,28 @@ YouTube URL · 웹캠 · 로컬 이미지 폴더를 소스로 받아 YOLO 모델
 ## 파이프라인 단계
 
 ```
-[Tab 1] 소스 선택 & 프레임 추출
+[1] 소스 선택 & 프레임 추출
     ↓
-[Tab 2] SAM3 오토라벨링
+[2] SAM3 오토라벨링
     ↓
-[Tab 3] 데이터셋 검토 & 구성
+[3] 데이터셋 검토 & 구성
     ↓
-[Tab 4] YOLO 학습
+[4] YOLO 학습
     ↓
-[Tab 5] 추론
+[5] 추론
     ↓
-[Tab 6] 침입 감지 (로컬 LLM 영역 설정 + YOLO 실시간 감시)
+[6] 침입 감지 (로컬 LLM 영역 설정 + YOLO 실시간 감시)
 ```
+
+---
+
+## 레이아웃 (반응형)
+
+- **사이드바 내비게이션** (`gr.Sidebar`) — PC에서는 좌측 고정 사이드바, 모바일에서는 토글 드로어로 자동 전환 (반응형)
+- 각 단계는 `gr.Column(visible=...)` 패널로 구성. 사이드바의 `gr.Radio`(`elem_id="pipeline_nav"`) 선택 → `nav.change`가 해당 패널만 표시
+- 탭 표시 이름은 번호 접두어("1.", "2.") 제거. 단계 순서는 사이드바 항목 순서(`NAV_STEPS`)로 표현
+- 데이터셋 단계 진입 시 `_maybe_load_classes`로 클래스 목록 자동 로드 (기존 `tab3.select` 대체)
+- 본문 패널은 `.main-panel`로 최대 폭 제한 + 중앙 정렬
 
 ---
 
@@ -79,7 +89,8 @@ yolo-webui/
 - 시작 시 `dataset/raw_frames/`의 기존 `frame_*.jpg` 삭제 후 새로 저장
 - 저장 경로: `dataset/raw_frames/frame_XXXXX.jpg`
 - 이미지 폴더 모드: `np.fromfile`+`cv2.imdecode`로 **유니코드(한글) 경로 안전 처리**, jpg/jpeg/png/bmp/webp/tiff 지원, jpg로 통일 저장
-- 폴더 선택은 tkinter 네이티브 다이얼로그(`filedialog.askdirectory`) 사용
+- 폴더 선택은 **Gradio 내장 파일 업로드**(`gr.File(file_count="directory", type="filepath")`) 사용 — 브라우저 기반이라 macOS·Windows·Linux 모두 동작 (이전 tkinter `filedialog` 방식은 macOS 미대응으로 제거)
+- 업로드 파일 리스트는 `_filter_image_paths()`로 지원 확장자만 필터링 후 파일명 기준 정렬. gr.File 경로(str) 및 `.name` 속성 객체 모두 방어적으로 처리
 - 소스 라디오 전환 시 입력칸 표시는 **클라이언트 JS 토글**(`elem_id` + `.src-hidden` CSS 클래스)로 처리 — Gradio 6 큐/동시성 race 회피 (서버 왕복 없음)
 - Gradio 중지: `_stop_event`(threading.Event) + `cancels=[capture_event]` 동시 사용
 - 프리뷰: capture_fps 간격으로만 yield → Gradio WebSocket 부담 최소화
@@ -94,6 +105,11 @@ yolo-webui/
 - 시작 시 `dataset/labels/`의 평면 `*.txt` 삭제 (이전 소스 오라벨이 새 이미지에 붙는 것 방지). `glob("*.txt")`는 최상위만 매칭 → `train/`·`val/` 하위 폴더는 보존
 - `conf=0.25`, `half=False`
 - 라벨링 중 마스크 오버레이 프리뷰 실시간 표시
+- **미리보기 → 전체 실행 2단계 흐름** (유저 편의성):
+  - `preview(prompts, conf, n_preview)`: 전체 프레임에서 `np.linspace`로 **균등 샘플링한 N장**만 추론해 갤러리로 표시. **라벨 파일 저장/삭제 없음** → 프롬프트·conf 튜닝 후 결과 확인용
+  - `label(prompts, conf)`: 결과가 괜찮으면 전체 프레임에 적용 + 라벨 저장 (기존 동작)
+  - 순수 추론부는 `_infer_and_overlay()` 헬퍼로 추출 → preview/label 공유 (rgb 오버레이, label_lines, 객체 수 반환)
+  - 중지 버튼은 `cancels=[preview_event, label_event]`로 두 흐름 모두 취소
 
 ```python
 # SAM3 초기화 패턴
@@ -112,12 +128,19 @@ cls_ids = results[0].boxes.cls.cpu().numpy().astype(int)
 ### Tab 3 — 데이터셋 검토 & 구성 (완료)
 **파일**: `pipeline/dataset.py`
 
+- **클래스 편집기 (리스트형)**: 탭 진입/「클래스 불러오기」 시 `scan_classes()`로 라벨을 스캔해 **클래스별 행(ID · 객체 수 + 즉시 수정 가능한 이름 입력칸)** 을 `@gr.render`로 동적 생성 → 가독성·편의성 향상
+  - 이름 우선순위: ① Tab 3에서 편집한 이름(편집 보존) → ② Tab 2 오토라벨링 프롬프트(SAM3 프롬프트 순서 = 클래스 ID) → ③ 기존 `dataset.yaml` names → ④ `class_{id}`
+  - 이름 칸 수정 시 `.change`로 **즉시** 「최종 클래스 이름」(`ds_prompts`, ID 0,1,2… 순서 쉼표 결합)에 반영. 이름 수정은 render 트리거 state(`ds_class_state`)를 건드리지 않아 **리렌더/포커스 유실 없음**
+  - `_count_class_ids()`는 `labels/*.txt` 최상위만 스캔(`train/`·`val/` 하위 제외)
 - `load_preview(prompts_str, filter_empty)`: raw_frames + labels 매칭 → bbox 오버레이 Gallery 표시
 - 통계: 전체 / 라벨 있음 / 라벨 없음 프레임 수
 - "라벨 없는 프레임 제외" 체크박스로 불량 데이터 필터링
+- **갤러리 이미지 개별 삭제**: 갤러리 클릭 → `select_frame()`이 상세 보기 + 파일명 표시 → 「선택한 이미지 삭제」 → `delete_frame()`이 이미지+라벨 삭제 후 갤러리/통계 갱신
+  - 선택은 캡션 파싱이 아니라 **`evt.index` → `_gallery_frames(filter_empty)` 매핑**으로 식별 → Gradio 버전별 `SelectData` 포맷 차이/빈프레임 필터 상태와 무관하게 정확
+  - `_gallery_frames()`는 `load_preview` 갤러리와 동일 순서(정렬 + filter_empty 적용)를 보장
 - `build_dataset(prompts_str, val_ratio, filter_empty)`: train/val 분할 후 복사
 - 분할 전 `images/train|val`, `labels/train|val`을 `shutil.rmtree`로 정리 → 재실행 시 데이터 누적 및 같은 프레임이 train/val 양쪽에 섞이는 누수 방지
-- `dataset/dataset.yaml` 자동 생성 (클래스명은 프롬프트에서 자동 설정)
+- `dataset/dataset.yaml` 자동 생성 (클래스명은 최종 클래스 이름에서 자동 설정)
 
 ### Tab 4 — YOLO 학습 (완료)
 **파일**: `pipeline/trainer.py`
@@ -145,8 +168,8 @@ cls_ids = results[0].boxes.cls.cpu().numpy().astype(int)
 **파일**: `pipeline/inference.py`
 
 - 소스: Tab 1과 동일 (YouTube URL / 웹캠 / 이미지 폴더), 영상은 `cv2.VideoCapture` 직접 사용
-- 이미지 폴더 모드(`_predict_folder`): 폴더 내 이미지를 순회하며 장당 추론·표시, 중지 전까지 반복(0.4초 간격)
-- 이미지 폴더 경로 미입력 시 **Tab 1에서 선택한 폴더 경로를 자동 상속**(`_inherit_folder`)
+- 이미지 폴더 모드(`_predict_folder`): 업로드된 이미지를 순회하며 장당 추론·표시, 중지 전까지 반복(0.4초 간격)
+- 폴더 입력은 `gr.File(file_count="directory")` 업로드. 업로드가 비어 있으면 **Tab 1 업로드 파일을 자동 상속**(`_inherit_folder`)
 - `infer_every`: N프레임마다 1회 추론, 나머지는 마지막 bbox 재사용 (기본값 3)
 - `display_interval = 1/15`: 15fps로 yield 제한 → Gradio WebSocket 부담 최소화
 - 표시 해상도: 854px 초과 시 리사이즈
@@ -158,8 +181,8 @@ cls_ids = results[0].boxes.cls.cpu().numpy().astype(int)
 **파일**: `pipeline/zone_monitor.py`
 
 - 소스: Tab 1/5와 동일 (YouTube URL / 웹캠 / 이미지 폴더)
-- 이미지 폴더 모드(`_stream_folder`): 이미지 순회하며 `_last_frame` 갱신(→ 영역 설정 가능) + 침입 판별, 중지 전까지 반복
-- 이미지 폴더 경로 미입력 시 Tab 1 폴더 경로 자동 상속
+- 이미지 폴더 모드(`_stream_folder`): 업로드 이미지 순회하며 `_last_frame` 갱신(→ 영역 설정 가능) + 침입 판별, 중지 전까지 반복
+- 폴더 입력은 `gr.File(file_count="directory")` 업로드. 업로드가 비어 있으면 Tab 1 업로드 파일 자동 상속
 - zone 오버레이 로직은 `_render_zones()` 헬퍼로 추출 — 비디오/폴더 루프 공유
 - YOLO 모델 경로 미입력 시 `runs/detect/`에서 최신 `best.pt` 자동 탐색
 - **영역 설정 흐름**:

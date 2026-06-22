@@ -1,34 +1,38 @@
 import html as _html
-import tkinter as tk
-from tkinter import filedialog
-from pathlib import Path
 
 import gradio as gr
 from pipeline import extractor, labeler, dataset, trainer, inference, zone_monitor
 
 
-def _pick_folder():
-    root = tk.Tk()
-    root.withdraw()
-    root.wm_attributes("-topmost", 1)
-    path = filedialog.askdirectory(title="이미지 폴더 선택", initialdir=str(Path.cwd()))
-    root.destroy()
-    return path or ""
-
-
-def _inherit_folder(source_type, current_path, tab1_path):
-    """이미지 폴더 선택 시, 경로가 비어 있으면 Tab 1의 폴더 경로를 채운다."""
-    if source_type == "이미지 폴더" and not (current_path or "").strip():
-        return gr.update(value=tab1_path or "")
+def _inherit_folder(source_type, current_files, tab1_files):
+    """이미지 폴더 선택 시, 업로드가 비어 있으면 Tab 1의 업로드 파일을 물려받는다."""
+    if source_type == "이미지 폴더" and not current_files:
+        return gr.update(value=tab1_files or None)
     return gr.update()
 
 
-def run_capture(source_type, youtube_url, capture_fps, folder_path):
-    yield from extractor.capture(source_type, youtube_url, int(capture_fps), folder_path)
+def run_capture(source_type, youtube_url, capture_fps, folder_files):
+    yield from extractor.capture(source_type, youtube_url, int(capture_fps), folder_files)
+
+
+def load_classes(current_prompts, label_prompts):
+    """라벨에서 클래스 목록을 스캔해 (class_state, 최종 클래스 이름 문자열) 반환."""
+    classes = dataset.scan_classes(current_prompts or "", label_prompts or "")
+    joined = ", ".join(c["name"] for c in classes)
+    return classes, joined
 
 
 def run_label(prompts_str, conf):
     yield from labeler.label(prompts_str, float(conf))
+
+
+def on_gallery_select(prompts_str, filter_empty, evt: gr.SelectData):
+    """갤러리 선택 이벤트 래퍼 — SelectData 어노테이션으로 evt 주입을 명시."""
+    return dataset.select_frame(prompts_str, filter_empty, evt)
+
+
+def run_label_preview(prompts_str, conf, n_preview):
+    yield from labeler.preview(prompts_str, float(conf), int(n_preview))
 
 
 _WRAP_STYLE = (
@@ -48,12 +52,43 @@ def run_train(epochs, imgsz, batch, lr0, device):
         yield f'<div style="{_WRAP_STYLE}"><pre style="{_PRE_STYLE}">{escaped}</pre></div>'
 
 
-_HIDE_CSS = ".src-hidden { display: none !important; }"
+_CSS = (
+    ".src-hidden { display: none !important; }"
+    ".cls-name-box input { font-weight:600; }"
+    # 사이드바 내비게이션 — 세로 풀폭 버튼 형태
+    "#pipeline_nav .wrap { flex-direction: column !important; "
+    "align-items: stretch !important; gap: 6px !important; }"
+    "#pipeline_nav label { width: 100% !important; margin: 0 !important; }"
+    # 본문 패널이 좁은 화면에서도 넘치지 않도록
+    ".main-panel { max-width: 1100px; margin: 0 auto; width: 100%; }"
+)
+
+# 사이드바 내비게이션 단계 (파이프라인 순서) — 표시 이름에서 번호 제거
+NAV_STEPS = [
+    "프레임 추출",
+    "SAM3 오토라벨링",
+    "데이터셋 구성",
+    "YOLO 학습",
+    "추론",
+    "침입 감지",
+]
 
 with gr.Blocks(title="YOLO 파이프라인") as demo:
 
-    # ── Tab 1: 프레임 추출 ──────────────────────────────────────
-    with gr.Tab("1. 프레임 추출"):
+    # ── 사이드바 (PC: 고정 / 모바일: 토글 드로어) ────────────────
+    with gr.Sidebar(width=260):
+        gr.Markdown("## 🦾 YOLO 파이프라인")
+        gr.Markdown("컴퓨터 비전 학습·추론 end-to-end 파이프라인")
+        nav = gr.Radio(
+            choices=NAV_STEPS,
+            value=NAV_STEPS[0],
+            show_label=False,
+            container=False,
+            elem_id="pipeline_nav",
+        )
+
+    # ── 프레임 추출 ──────────────────────────────────────
+    with gr.Column(visible=True, elem_classes=["main-panel"]) as panel_extract:
         gr.Markdown("### 소스 선택 & 프레임 추출 (중지 버튼으로 종료)")
 
         with gr.Row():
@@ -74,15 +109,12 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
             elem_id="tab1_youtube_url",
         )
         with gr.Row(elem_id="tab1_folder_row", elem_classes=["src-hidden"]) as folder_row:
-            folder_path = gr.Textbox(
-                placeholder="C:/Users/me/my_images",
-                label="이미지 폴더 경로",
-                info="jpg, jpeg, png, bmp, webp, tiff 지원 — 하위 폴더 미포함",
-                scale=5,
+            folder_files = gr.File(
+                label="이미지 폴더 업로드 (폴더 또는 여러 파일 선택)",
+                file_count="directory",
+                type="filepath",
+                height=200,
             )
-            folder_browse_btn = gr.Button("폴더 선택", scale=1, min_width=100)
-
-        folder_browse_btn.click(fn=_pick_folder, outputs=folder_path)
 
         source_type.change(
             fn=None,
@@ -105,7 +137,7 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
 
         capture_event = cap_start_btn.click(
             fn=run_capture,
-            inputs=[source_type, youtube_url, capture_fps, folder_path],
+            inputs=[source_type, youtube_url, capture_fps, folder_files],
             outputs=[cap_preview, cap_status],
         )
         cap_stop_btn.click(
@@ -113,27 +145,50 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
             cancels=[capture_event],
         )
 
-    # ── Tab 2: SAM3 오토라벨링 ──────────────────────────────────
-    with gr.Tab("2. SAM3 오토라벨링"):
+    # ── SAM3 오토라벨링 ──────────────────────────────────
+    with gr.Column(visible=False, elem_classes=["main-panel"]) as panel_label:
         gr.Markdown("### SAM3 텍스트 프롬프트로 자동 라벨링")
+        gr.Markdown(
+            "프롬프트와 conf를 입력하고 **① 미리보기**로 샘플 라벨을 확인하세요. "
+            "결과가 괜찮으면 **② 전체 라벨링 시작**으로 모든 프레임에 적용합니다."
+        )
 
         prompts_input = gr.Textbox(
             placeholder="person, car, bicycle",
             label="클래스 프롬프트 (쉼표 구분)",
             value="",
         )
-        conf_slider = gr.Slider(
-            minimum=0.05, maximum=0.9, value=0.25, step=0.05,
-            label="신뢰도 임계값 (conf)",
-        )
+        with gr.Row():
+            conf_slider = gr.Slider(
+                minimum=0.05, maximum=0.9, value=0.25, step=0.05,
+                label="신뢰도 임계값 (conf)",
+            )
+            n_preview_slider = gr.Slider(
+                minimum=1, maximum=12, value=4, step=1,
+                label="미리보기 샘플 수",
+                info="전체 프레임에서 균등 샘플링해 라벨 결과를 미리 확인 (저장 안 됨)",
+            )
 
         with gr.Row():
-            label_start_btn = gr.Button("오토라벨링 시작", variant="primary")
-            label_stop_btn  = gr.Button("중지", variant="stop")
+            label_preview_btn = gr.Button("① 미리보기", variant="secondary")
+            label_start_btn   = gr.Button("② 전체 라벨링 시작", variant="primary")
+            label_stop_btn    = gr.Button("중지", variant="stop")
 
-        label_preview = gr.Image(label="라벨링 미리보기", type="numpy")
+        label_gallery = gr.Gallery(
+            label="미리보기 결과 (마스크 오버레이 · 저장 전)",
+            columns=4,
+            height=360,
+            object_fit="contain",
+        )
+
+        label_preview = gr.Image(label="전체 라벨링 진행 미리보기", type="numpy")
         label_status  = gr.Textbox(label="상태", interactive=False)
 
+        preview_event = label_preview_btn.click(
+            fn=run_label_preview,
+            inputs=[prompts_input, conf_slider, n_preview_slider],
+            outputs=[label_gallery, label_status],
+        )
         label_event = label_start_btn.click(
             fn=run_label,
             inputs=[prompts_input, conf_slider],
@@ -141,22 +196,57 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
         )
         label_stop_btn.click(
             fn=labeler.stop,
-            cancels=[label_event],
+            cancels=[preview_event, label_event],
         )
 
 
-    # ── Tab 3: 데이터셋 검토 & 구성 ────────────────────────────────
-    with gr.Tab("3. 데이터셋 구성") as tab3:
+    # ── 데이터셋 검토 & 구성 ────────────────────────────────
+    with gr.Column(visible=False, elem_classes=["main-panel"]) as panel_dataset:
         gr.Markdown("### 라벨링 결과 검토 후 train/val 분할")
 
-        cls_info = gr.Textbox(
-            label="현재 라벨 클래스 현황 (ID → 개수)",
-            interactive=False,
-            lines=3,
+        gr.Markdown(
+            "#### 클래스 목록 — 이름을 클릭해 바로 수정하세요\n"
+            "라벨에서 감지된 클래스 ID와 객체 수입니다. 각 이름 칸을 수정하면 "
+            "아래 **최종 클래스 이름**에 즉시 반영됩니다."
         )
+
+        ds_class_state = gr.State([])
+
+        load_classes_btn = gr.Button("클래스 불러오기 / 새로고침", variant="secondary")
+
+        @gr.render(inputs=ds_class_state)
+        def _render_class_editor(classes):
+            if not classes:
+                gr.Markdown(
+                    "_「클래스 불러오기」를 누르면 라벨에서 감지된 클래스 목록이 표시됩니다. "
+                    "(Tab 2 오토라벨링을 먼저 실행하세요.)_"
+                )
+                return
+
+            name_boxes = []
+            for c in classes:
+                with gr.Row(equal_height=True):
+                    gr.Markdown(f"**ID {c['id']}** · {c['count']}개 객체")
+                    nb = gr.Textbox(
+                        value=c["name"],
+                        show_label=False,
+                        container=False,
+                        scale=3,
+                        elem_classes=["cls-name-box"],
+                    )
+                name_boxes.append(nb)
+
+            def _sync(*names):
+                # ID 순서대로 이름을 모아 최종 클래스 이름 문자열 생성
+                return ", ".join((n or "").strip() for n in names)
+
+            # 어느 칸을 수정해도 즉시 최종 클래스 이름에 반영 (state 미변경 → 리렌더/포커스 유실 없음)
+            for nb in name_boxes:
+                nb.change(_sync, inputs=name_boxes, outputs=ds_prompts)
+
         ds_prompts = gr.Textbox(
-            placeholder="person, car, bicycle",
-            label="클래스 프롬프트 (위 ID 순서에 맞게 입력)",
+            label="최종 클래스 이름 (ID 0,1,2… 순서 · 자동 반영, 직접 수정도 가능)",
+            placeholder="위에서 클래스를 불러오면 자동으로 채워집니다.",
         )
 
         with gr.Row():
@@ -172,7 +262,7 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
         preview_btn = gr.Button("라벨 미리보기 로드", variant="secondary")
         ds_stats    = gr.Textbox(label="통계", interactive=False)
         ds_gallery  = gr.Gallery(
-            label="프레임별 라벨 확인 (클릭하면 상세 보기)",
+            label="프레임별 라벨 확인 — 이미지를 클릭하면 우측 상세 보기 + 삭제 가능",
             columns=4,
             height=500,
             object_fit="contain",
@@ -185,22 +275,25 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
         )
 
         # ── 상세 보기 & 삭제 ────────────────────────────────────────
+        selected_stem_state = gr.State(value="")
         with gr.Row():
             ds_detail = gr.Image(
-                label="상세 보기",
+                label="선택한 이미지 상세 보기",
                 type="numpy",
                 interactive=False,
                 visible=True,
                 height=400,
+                scale=2,
             )
-        selected_stem_state = gr.State(value="")
-        with gr.Row():
-            delete_btn    = gr.Button("이 이미지 삭제", variant="stop")
-            delete_status = gr.Textbox(label="삭제 결과", interactive=False, scale=3)
+            with gr.Column(scale=1):
+                delete_status = gr.Textbox(
+                    label="선택 / 삭제 상태", interactive=False, lines=3,
+                )
+                delete_btn = gr.Button("🗑 선택한 이미지 삭제", variant="stop")
 
         ds_gallery.select(
-            fn=dataset.select_frame,
-            inputs=[ds_prompts],
+            fn=on_gallery_select,
+            inputs=[ds_prompts, filter_empty_chk],
             outputs=[ds_detail, selected_stem_state, delete_status],
         )
         delete_btn.click(
@@ -219,10 +312,14 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
             outputs=build_status,
         )
 
-        tab3.select(fn=dataset.scan_class_ids, outputs=[cls_info])
+        load_classes_btn.click(
+            fn=load_classes,
+            inputs=[ds_prompts, prompts_input],
+            outputs=[ds_class_state, ds_prompts],
+        )
 
-    # ── Tab 4: YOLO 학습 ────────────────────────────────────────
-    with gr.Tab("4. YOLO 학습"):
+    # ── YOLO 학습 ────────────────────────────────────────
+    with gr.Column(visible=False, elem_classes=["main-panel"]) as panel_train:
         gr.Markdown("### YOLO 모델 학습")
         gr.Markdown(
             "> **파라미터 안내** — 아래 값은 ultralytics 기본값 기준이며 최적화된 값이 아닙니다. "
@@ -280,8 +377,8 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
             cancels=[train_event],
         )
 
-    # ── Tab 5: 추론 ─────────────────────────────────────────────
-    with gr.Tab("5. 추론"):
+    # ── 추론 ─────────────────────────────────────────────
+    with gr.Column(visible=False, elem_classes=["main-panel"]) as panel_infer:
         gr.Markdown("### 학습된 모델로 실시간 추론")
 
         inf_model_path = gr.Textbox(
@@ -312,15 +409,12 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
             elem_id="tab5_youtube_url",
         )
         with gr.Row(elem_id="tab5_folder_row", elem_classes=["src-hidden"]) as inf_folder_row:
-            inf_folder_path = gr.Textbox(
-                placeholder="C:/Users/me/my_images",
-                label="이미지 폴더 경로",
-                info="비우면 Tab 1에서 선택한 폴더를 자동 사용",
-                scale=5,
+            inf_folder_files = gr.File(
+                label="이미지 폴더 업로드 (비우면 Tab 1 업로드 자동 사용)",
+                file_count="directory",
+                type="filepath",
+                height=200,
             )
-            inf_folder_browse_btn = gr.Button("폴더 선택", scale=1, min_width=100)
-
-        inf_folder_browse_btn.click(fn=_pick_folder, outputs=inf_folder_path)
 
         inf_source_type.change(
             fn=None,
@@ -335,8 +429,8 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
         )
         inf_source_type.change(
             fn=_inherit_folder,
-            inputs=[inf_source_type, inf_folder_path, folder_path],
-            outputs=inf_folder_path,
+            inputs=[inf_source_type, inf_folder_files, folder_files],
+            outputs=inf_folder_files,
             show_progress="hidden",
         )
 
@@ -349,7 +443,7 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
 
         inf_event = inf_start_btn.click(
             fn=inference.predict,
-            inputs=[inf_model_path, inf_source_type, inf_youtube_url, inf_conf, inf_skip, inf_folder_path],
+            inputs=[inf_model_path, inf_source_type, inf_youtube_url, inf_conf, inf_skip, inf_folder_files],
             outputs=[inf_preview, inf_status],
         )
         inf_stop_btn.click(
@@ -358,8 +452,8 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
         )
 
 
-    # ── Tab 6: 침입 감지 ────────────────────────────────────────
-    with gr.Tab("6. 침입 감지"):
+    # ── 침입 감지 ────────────────────────────────────────
+    with gr.Column(visible=False, elem_classes=["main-panel"]) as panel_zone:
         gr.Markdown("### 로컬 LLM 영역 설정 & 실시간 침입 감지")
 
         zm_model_path = gr.Textbox(
@@ -390,15 +484,12 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
             elem_id="tab6_youtube_url",
         )
         with gr.Row(elem_id="tab6_folder_row", elem_classes=["src-hidden"]) as zm_folder_row:
-            zm_folder_path = gr.Textbox(
-                placeholder="C:/Users/me/my_images",
-                label="이미지 폴더 경로",
-                info="비우면 Tab 1에서 선택한 폴더를 자동 사용",
-                scale=5,
+            zm_folder_files = gr.File(
+                label="이미지 폴더 업로드 (비우면 Tab 1 업로드 자동 사용)",
+                file_count="directory",
+                type="filepath",
+                height=200,
             )
-            zm_folder_browse_btn = gr.Button("폴더 선택", scale=1, min_width=100)
-
-        zm_folder_browse_btn.click(fn=_pick_folder, outputs=zm_folder_path)
 
         zm_source_type.change(
             fn=None,
@@ -413,8 +504,8 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
         )
         zm_source_type.change(
             fn=_inherit_folder,
-            inputs=[zm_source_type, zm_folder_path, folder_path],
-            outputs=zm_folder_path,
+            inputs=[zm_source_type, zm_folder_files, folder_files],
+            outputs=zm_folder_files,
             show_progress="hidden",
         )
 
@@ -448,7 +539,7 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
 
         zm_stream_event = zm_start_btn.click(
             fn=zone_monitor.stream,
-            inputs=[zm_source_type, zm_youtube_url, zm_model_path, zm_conf, zm_skip, zm_folder_path],
+            inputs=[zm_source_type, zm_youtube_url, zm_model_path, zm_conf, zm_skip, zm_folder_files],
             outputs=[zm_preview, zm_stream_status],
         )
         zm_stop_btn.click(
@@ -461,6 +552,27 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
             outputs=[zm_zone_status, zm_llm_log],
         )
 
+    # ── 사이드바 내비게이션 → 패널 전환 ──────────────────────────
+    _PANELS = [panel_extract, panel_label, panel_dataset,
+               panel_train, panel_infer, panel_zone]
+
+    def _switch_panel(choice):
+        return [gr.update(visible=(step == choice)) for step in NAV_STEPS]
+
+    nav.change(_switch_panel, inputs=nav, outputs=_PANELS)
+
+    def _maybe_load_classes(choice, current_prompts, label_prompts):
+        """데이터셋 단계로 진입할 때만 클래스 목록 자동 로드."""
+        if choice != "데이터셋 구성":
+            return gr.update(), gr.update()
+        return load_classes(current_prompts, label_prompts)
+
+    nav.change(
+        _maybe_load_classes,
+        inputs=[nav, ds_prompts, prompts_input],
+        outputs=[ds_class_state, ds_prompts],
+    )
+
 
 if __name__ == "__main__":
-    demo.queue().launch(theme=gr.themes.Default(), css=_HIDE_CSS)
+    demo.queue().launch(theme=gr.themes.Default(), css=_CSS)

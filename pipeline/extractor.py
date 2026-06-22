@@ -34,10 +34,11 @@ def _get_youtube_stream_url(url: str) -> str:
         return info["url"]
 
 
-def capture(source_type: str, youtube_url: str, capture_fps: int, folder_path: str = ""):
+def capture(source_type: str, youtube_url: str, capture_fps: int, folder_files=None):
     """
     Generator — yields (rgb_frame | None, status_str) until done or stopped.
     source_type: "YouTube URL" | "웹캠" | "이미지 폴더"
+    folder_files: 이미지 폴더 모드에서 gr.File 업로드 결과(파일 경로 리스트).
     """
     _stop_event.clear()
     OUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -48,7 +49,7 @@ def capture(source_type: str, youtube_url: str, capture_fps: int, folder_path: s
 
     # ── 이미지 폴더 임포트 ─────────────────────────────────────
     if source_type == "이미지 폴더":
-        yield from _import_from_folder(folder_path)
+        yield from _import_from_files(folder_files)
         return
 
     # ── 소스 열기 ──────────────────────────────────────────────
@@ -112,29 +113,25 @@ def _imread_any_path(path: Path) -> "np.ndarray | None":
     return cv2.imdecode(buf, cv2.IMREAD_COLOR)
 
 
-def _import_from_folder(folder_path: str):
-    """이미지 폴더에서 raw_frames로 복사."""
-    if not folder_path or not folder_path.strip():
-        yield None, "폴더 경로를 입력하세요."
-        return
+def _filter_image_paths(files) -> "list[Path]":
+    """gr.File 업로드 결과를 받아 지원 형식의 이미지 경로만 정렬해 반환."""
+    if not files:
+        return []
+    paths = []
+    for f in files:
+        # gr.File(type="filepath")는 경로 문자열을 주지만, 방어적으로 .name도 처리
+        p = Path(getattr(f, "name", f))
+        if p.is_file() and p.suffix.lower() in _IMAGE_EXTS:
+            paths.append(p)
+    return sorted(paths, key=lambda p: p.name)
 
-    src = Path(folder_path.strip())
-    if not src.exists():
-        yield None, f"폴더를 찾을 수 없습니다: {src}"
-        return
-    if not src.is_dir():
-        yield None, f"폴더가 아닙니다: {src}"
-        return
 
-    yield None, f"폴더 스캔 중... {src}"
+def _import_from_files(files):
+    """gr.File 업로드된 이미지 파일들을 raw_frames로 복사."""
+    images = _filter_image_paths(files)
 
-    try:
-        images = sorted(
-            p for p in src.iterdir()
-            if p.is_file() and p.suffix.lower() in _IMAGE_EXTS
-        )
-    except Exception as e:
-        yield None, f"폴더 읽기 실패: {e}"
+    if not files:
+        yield None, "이미지 폴더(또는 파일)를 업로드하세요."
         return
 
     if not images:
