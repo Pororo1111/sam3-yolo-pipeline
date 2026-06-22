@@ -561,6 +561,21 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
 
     nav.change(_switch_panel, inputs=nav, outputs=_PANELS)
 
+    # 패널 전환 직후 강제 리페인트 — Gradio 6에서 visible 토글로 처음 노출된
+    # Column이 레이아웃되지 않아 검정/빈 화면으로 보이는 문제 회피
+    # (resize 이벤트를 dispatch해 Svelte/브라우저의 리플로우를 강제)
+    nav.change(
+        fn=None,
+        inputs=None,
+        outputs=None,
+        js="""() => {
+            requestAnimationFrame(() => {
+                window.dispatchEvent(new Event('resize'));
+                setTimeout(() => window.dispatchEvent(new Event('resize')), 60);
+            });
+        }""",
+    )
+
     def _maybe_load_classes(choice, current_prompts, label_prompts):
         """데이터셋 단계로 진입할 때만 클래스 목록 자동 로드."""
         if choice != "데이터셋 구성":
