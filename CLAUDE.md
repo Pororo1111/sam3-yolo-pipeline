@@ -129,8 +129,10 @@ cls_ids = results[0].boxes.cls.cpu().numpy().astype(int)
 **파일**: `pipeline/dataset.py`
 
 - **클래스 편집기 (리스트형)**: 탭 진입/「클래스 불러오기」 시 `scan_classes()`로 라벨을 스캔해 **클래스별 행(ID · 객체 수 + 즉시 수정 가능한 이름 입력칸)** 을 `@gr.render`로 동적 생성 → 가독성·편의성 향상
-  - 이름 우선순위: ① Tab 3에서 편집한 이름(편집 보존) → ② Tab 2 오토라벨링 프롬프트(SAM3 프롬프트 순서 = 클래스 ID) → ③ 기존 `dataset.yaml` names → ④ `class_{id}`
-  - 이름 칸 수정 시 `.change`로 **즉시** 「최종 클래스 이름」(`ds_prompts`, ID 0,1,2… 순서 쉼표 결합)에 반영. 이름 수정은 render 트리거 state(`ds_class_state`)를 건드리지 않아 **리렌더/포커스 유실 없음**
+  - 이름 우선순위: ① Tab 2 오토라벨링 프롬프트(`label_prompts`, SAM3 프롬프트 순서 = 클래스 ID) → ② 기존 `dataset.yaml` names → ③ `class_{id}`. **최신 라벨링 결과를 항상 우선** 반영 (이전엔 Tab 3 편집값이 우선이라 재라벨링해도 옛 이름이 남던 버그 수정)
+  - 이름 편집은 **각 클래스 이름 칸에서 직접** 수행 → `.change`로 **즉시** 하단 「최종 클래스 이름」(`ds_prompts`, ID 0,1,2… 순서 쉼표 결합)에 반영. `ds_prompts`는 `interactive=False`(자동 생성 표시 전용, 직접 입력 불가)
+  - 이름 수정은 render 트리거 state(`ds_class_state`)를 건드리지 않아 **리렌더/포커스 유실 없음**
+  - **편집 보존 vs 자동 갱신**: 탭 진입 시 `_maybe_load_classes`가 직전 로드에 쓴 Tab 2 프롬프트(`ds_last_label` state)와 현재 Tab 2 프롬프트를 비교 → 동일하면(단순 탭 전환) 재스캔 안 함(편집한 이름 보존), 다르면(=Tab 2 재라벨링) 새 프롬프트 이름으로 자동 갱신
   - `_count_class_ids()`는 `labels/*.txt` 최상위만 스캔(`train/`·`val/` 하위 제외)
 - `load_preview(prompts_str, filter_empty)`: raw_frames + labels 매칭 → bbox 오버레이 Gallery 표시
 - 통계: 전체 / 라벨 있음 / 라벨 없음 프레임 수

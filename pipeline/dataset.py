@@ -123,28 +123,27 @@ def _count_class_ids() -> dict[int, int]:
     return counts
 
 
-def scan_classes(current_prompts: str = "", label_prompts: str = "") -> list[dict]:
+def scan_classes(label_prompts: str = "") -> list[dict]:
     """labels/ 를 스캔해 클래스 목록을 [{id, name, count}] 형태로 반환.
 
-    이름 우선순위:
-      1) Tab 3 에서 이미 편집한 이름(current_prompts)  — 사용자의 수정 보존
-      2) Tab 2 오토라벨링 프롬프트(label_prompts)        — SAM3 프롬프트 순서 = 클래스 ID
-      3) 기존 dataset.yaml 의 names
-      4) class_{id}
+    이름 우선순위 (최신 라벨링 결과를 항상 우선):
+      1) Tab 2 오토라벨링 프롬프트(label_prompts) — SAM3 프롬프트 순서 = 클래스 ID
+      2) 기존 dataset.yaml 의 names
+      3) class_{id}
+
+    Tab 3 에서 직접 편집한 이름의 보존은 호출부(app.py)에서 "Tab 2 프롬프트가
+    바뀌지 않았으면 재스캔하지 않음"으로 처리한다. (재라벨링 시 새 이름 반영)
     """
     counts = _count_class_ids()
     if not counts:
         return []
 
-    cur = [p.strip() for p in current_prompts.split(",") if p.strip()]
     lab = [p.strip() for p in label_prompts.split(",") if p.strip()]
     yaml_names = _read_yaml_names()
 
     classes = []
     for cid in sorted(counts):
-        if cid < len(cur):
-            name = cur[cid]
-        elif cid < len(lab):
+        if cid < len(lab):
             name = lab[cid]
         elif cid in yaml_names:
             name = yaml_names[cid]
