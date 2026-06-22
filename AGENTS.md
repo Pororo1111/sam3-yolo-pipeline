@@ -50,7 +50,7 @@ YouTube URL · 웹캠 · 로컬 이미지 폴더를 소스로 받아 YOLO 모델
 
 ```
 yolo-webui/
-├── CLAUDE.md
+├── AGENTS.md
 ├── app.py                  ← Gradio 메인 진입점
 ├── pipeline/
 │   ├── __init__.py
