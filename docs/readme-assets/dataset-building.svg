@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="560" viewBox="0 0 1200 560">
+  <defs><marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto"><path d="M0,0 L0,12 L12,6 z" fill="#2563eb"/></marker></defs>
+  <rect width="1200" height="560" rx="28" fill="#f8fafc"/>
+  <text x="52" y="70" font-family="Arial, sans-serif" font-size="34" font-weight="800" fill="#0f172a">데이터셋 구축 과정</text>
+  <text x="52" y="108" font-family="Arial, sans-serif" font-size="18" fill="#475569">SAM3 분할 결과와 Gemma 4 12B 라벨 보조를 활용하여 YOLO 학습 데이터를 구성합니다.</text>
+  <g font-family="Arial, sans-serif">
+    <g transform="translate(70,185)"><rect width="165" height="125" rx="18" fill="#ffffff" stroke="#bfdbfe" stroke-width="3"/><text x="82" y="42" text-anchor="middle" font-size="20" font-weight="900" fill="#1e3a8a">프레임 추출</text><text x="82" y="78" text-anchor="middle" font-size="14" fill="#475569">공항 내부 영상</text></g>
+    <path d="M245 248 H305" stroke="#2563eb" stroke-width="4" marker-end="url(#arrow)"/>
+    <g transform="translate(320,185)"><rect width="165" height="125" rx="18" fill="#ffffff" stroke="#bbf7d0" stroke-width="3"/><text x="82" y="42" text-anchor="middle" font-size="20" font-weight="900" fill="#166534">SAM3 분할</text><text x="82" y="78" text-anchor="middle" font-size="14" fill="#475569">객체 후보 마스크</text></g>
+    <path d="M495 248 H555" stroke="#2563eb" stroke-width="4" marker-end="url(#arrow)"/>
+    <g transform="translate(570,185)"><rect width="185" height="125" rx="18" fill="#ffffff" stroke="#fed7aa" stroke-width="3"/><text x="92" y="40" text-anchor="middle" font-size="19" font-weight="900" fill="#9a3412">Gemma 4 12B</text><text x="92" y="75" text-anchor="middle" font-size="14" fill="#475569">라벨 기준 정리</text></g>
+    <path d="M765 248 H825" stroke="#2563eb" stroke-width="4" marker-end="url(#arrow)"/>
+    <g transform="translate(840,185)"><rect width="165" height="125" rx="18" fill="#ffffff" stroke="#fecaca" stroke-width="3"/><text x="82" y="42" text-anchor="middle" font-size="20" font-weight="900" fill="#991b1b">사용자 검수</text><text x="82" y="78" text-anchor="middle" font-size="14" fill="#475569">오탐/누락 수정</text></g>
+    <path d="M1015 248 H1065" stroke="#2563eb" stroke-width="4" marker-end="url(#arrow)"/>
+    <g transform="translate(1078,185)"><rect width="90" height="125" rx="18" fill="#ffffff" stroke="#bfdbfe" stroke-width="3"/><text x="45" y="42" text-anchor="middle" font-size="17" font-weight="900" fill="#1d4ed8">YOLO</text><text x="45" y="76" text-anchor="middle" font-size="13" fill="#475569">학습</text></g>
+  </g>
+  <rect x="105" y="385" width="990" height="72" rx="18" fill="#eff6ff" stroke="#93c5fd" stroke-width="3"/>
+  <text x="140" y="428" font-family="Arial, sans-serif" font-size="19" font-weight="800" fill="#1e3a8a">목표: 사람이 모든 프레임을 직접 라벨링하지 않고, 자동 생성 후보를 검수하는 방식으로 구축 비용을 줄입니다.</text>
+</svg>
