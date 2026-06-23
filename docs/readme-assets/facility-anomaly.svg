@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="620" viewBox="0 0 1200 620">
+  <rect width="1200" height="620" rx="28" fill="#f8fafc"/>
+  <text x="52" y="70" font-family="Arial, sans-serif" font-size="34" font-weight="800" fill="#0f172a">시설물 정상 여부 감지 예시</text>
+  <text x="52" y="108" font-family="Arial, sans-serif" font-size="18" fill="#475569">에스컬레이터 계단의 노란색 안전바 일부 탈락처럼 작은 이상을 기준 영역과 비교합니다.</text>
+  <g font-family="Arial, sans-serif">
+    <rect x="70" y="155" width="500" height="365" rx="20" fill="#ffffff" stroke="#bbf7d0" stroke-width="3"/>
+    <text x="105" y="205" font-size="25" font-weight="900" fill="#166534">정상 상태</text>
+    <rect x="110" y="245" width="420" height="190" rx="14" fill="#e5e7eb" stroke="#94a3b8" stroke-width="3"/>
+    <path d="M150 395 L490 270" stroke="#64748b" stroke-width="18" stroke-linecap="round"/>
+    <path d="M172 387 L230 365 M260 354 L318 332 M348 321 L406 299 M436 288 L482 273" stroke="#facc15" stroke-width="10" stroke-linecap="round"/>
+    <rect x="120" y="455" width="390" height="38" rx="10" fill="#dcfce7"/>
+    <text x="170" y="481" font-size="17" font-weight="800" fill="#166534">안전바가 기준 위치에 연속적으로 존재</text>
+    <rect x="630" y="155" width="500" height="365" rx="20" fill="#ffffff" stroke="#fecaca" stroke-width="3"/>
+    <text x="665" y="205" font-size="25" font-weight="900" fill="#991b1b">이상 상태</text>
+    <rect x="670" y="245" width="420" height="190" rx="14" fill="#e5e7eb" stroke="#94a3b8" stroke-width="3"/>
+    <path d="M710 395 L1050 270" stroke="#64748b" stroke-width="18" stroke-linecap="round"/>
+    <path d="M732 387 L790 365 M820 354 L878 332" stroke="#facc15" stroke-width="10" stroke-linecap="round"/>
+    <path d="M908 321 L966 299 M996 288 L1042 273" stroke="#facc15" stroke-width="10" stroke-linecap="round" opacity="0.22"/>
+    <circle cx="970" cy="298" r="23" fill="#ef4444"/><text x="1005" y="304" font-size="17" font-weight="800" fill="#b91c1c">결손</text>
+    <rect x="680" y="455" width="390" height="38" rx="10" fill="#fee2e2"/>
+    <text x="735" y="481" font-size="17" font-weight="800" fill="#991b1b">기준 영역 내 안전바 결손 의심</text>
+  </g>
+</svg>
