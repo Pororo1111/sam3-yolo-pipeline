@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="720" viewBox="0 0 1200 720">
+  <rect width="1200" height="720" rx="28" fill="#e5eefb"/>
+  <rect x="36" y="36" width="1128" height="648" rx="24" fill="#0f172a"/>
+  <rect x="36" y="36" width="210" height="648" rx="24" fill="#020617"/>
+  <text x="66" y="82" font-family="Arial, sans-serif" font-size="22" font-weight="900" fill="#ffffff">공항 안전 분석</text>
+  <text x="66" y="112" font-family="Arial, sans-serif" font-size="13" fill="#94a3b8">실험/검수 도구</text>
+  <g font-family="Arial, sans-serif" font-size="15" font-weight="800">
+    <rect x="58" y="150" width="150" height="38" rx="10" fill="#2563eb"/><text x="88" y="175" fill="#ffffff">대시보드</text>
+    <text x="88" y="225" fill="#cbd5e1">영상 입력</text>
+    <text x="88" y="272" fill="#cbd5e1">데이터셋 구축</text>
+    <text x="88" y="319" fill="#cbd5e1">YOLO 학습</text>
+    <text x="88" y="366" fill="#cbd5e1">영역 추천</text>
+    <text x="88" y="413" fill="#cbd5e1">이벤트 로그</text>
+  </g>
+  <text x="278" y="82" font-family="Arial, sans-serif" font-size="26" font-weight="900" fill="#ffffff">공항 내부 작업 안전관리 분석 화면</text>
+  <text x="278" y="112" font-family="Arial, sans-serif" font-size="14" fill="#94a3b8">SAM3 · Gemma 4 12B · YOLO · ByteTrack</text>
+  <rect x="278" y="145" width="620" height="405" rx="18" fill="#dbeafe"/>
+  <rect x="278" y="345" width="620" height="205" fill="#cbd5e1"/>
+  <path d="M330 392 L820 392 L760 510 L395 510 Z" fill="#facc15" fill-opacity="0.25" stroke="#f59e0b" stroke-width="5" stroke-dasharray="12 8"/>
+  <text x="520" y="462" font-family="Arial, sans-serif" font-size="24" font-weight="900" fill="#92400e">작업 통제 영역</text>
+  <rect x="430" y="284" width="68" height="125" fill="none" stroke="#ef4444" stroke-width="5"/>
+  <text x="506" y="304" font-family="Arial, sans-serif" font-size="16" font-weight="800" fill="#b91c1c">침입 ID-03</text>
+  <circle cx="464" cy="314" r="14" fill="#ef4444"/><rect x="453" y="328" width="22" height="55" rx="9" fill="#ef4444"/>
+  <path d="M610 255 L750 255" stroke="#facc15" stroke-width="12" stroke-linecap="round"/>
+  <circle cx="756" cy="255" r="14" fill="#ef4444"/>
+  <text x="615" y="226" font-family="Arial, sans-serif" font-size="16" font-weight="800" fill="#991b1b">안전바 결손 의심</text>
+  <rect x="925" y="145" width="205" height="118" rx="16" fill="#111827" stroke="#334155"/>
+  <text x="950" y="182" font-family="Arial, sans-serif" font-size="18" font-weight="900" fill="#ffffff">감시 영역 추천</text>
+  <text x="950" y="215" font-family="Arial, sans-serif" font-size="14" fill="#bfdbfe">A. 하단 진입부</text>
+  <text x="950" y="240" font-family="Arial, sans-serif" font-size="14" fill="#bfdbfe">B. 안전바 위치</text>
+  <rect x="925" y="288" width="205" height="155" rx="16" fill="#111827" stroke="#334155"/>
+  <text x="950" y="326" font-family="Arial, sans-serif" font-size="18" font-weight="900" fill="#ffffff">이벤트 로그</text>
+  <rect x="950" y="348" width="155" height="34" rx="8" fill="#7f1d1d"/><text x="965" y="371" font-family="Arial, sans-serif" font-size="14" fill="#fecaca">침입 감지</text>
+  <rect x="950" y="396" width="155" height="34" rx="8" fill="#78350f"/><text x="965" y="419" font-family="Arial, sans-serif" font-size="14" fill="#fde68a">시설물 이상</text>
+  <rect x="925" y="468" width="205" height="82" rx="16" fill="#111827" stroke="#334155"/>
+  <text x="950" y="505" font-family="Arial, sans-serif" font-size="18" font-weight="900" fill="#ffffff">모델 상태</text>
+  <text x="950" y="532" font-family="Arial, sans-serif" font-size="14" fill="#bbf7d0">YOLO / ByteTrack 실행 중</text>
+  <rect x="278" y="580" width="852" height="58" rx="14" fill="#111827" stroke="#334155"/>
+  <text x="304" y="616" font-family="Arial, sans-serif" font-size="17" font-weight="800" fill="#cbd5e1">검수 목적: 추천 영역을 사람이 확인하고 수정한 뒤 안전 이벤트 판정 기준에 반영</text>
+</svg>
