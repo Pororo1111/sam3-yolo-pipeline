@@ -6,9 +6,12 @@ import numpy as np
 import yt_dlp
 from pathlib import Path
 
+from pipeline import webcams
+
 OUT_DIR = Path("dataset/raw_frames")
 
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tiff", ".tif"}
+_VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v", ".mpeg", ".mpg"}
 
 _stop_event = threading.Event()
 _saved_count = 0  # 현재 캡처 세션에서 저장한 장수 (중지 시 최종 메시지에 사용)
@@ -43,11 +46,13 @@ def _get_youtube_stream_url(url: str) -> str:
         return info["url"]
 
 
-def capture(source_type: str, youtube_url: str, capture_fps: int, folder_files=None):
+def capture(source_type: str, youtube_url: str, capture_fps: int, folder_files=None, webcam_index=None, video_file=None):
     """
     Generator — yields (rgb_frame | None, status_str) until done or stopped.
-    source_type: "YouTube URL" | "웹캠" | "이미지 폴더"
+    source_type: "YouTube URL" | "웹캠" | "비디오 파일" | "이미지 폴더"
     folder_files: 이미지 폴더 모드에서 gr.File 업로드 결과(파일 경로 리스트).
+    webcam_index: 웹캠 모드에서 사용할 장비 인덱스.
+    video_file: 비디오 파일 모드에서 gr.File 업로드 결과.
     """
     global _saved_count
     _stop_event.clear()
@@ -76,8 +81,14 @@ def capture(source_type: str, youtube_url: str, capture_fps: int, folder_files=N
             yield None, f"URL 추출 실패: {e}"
             return
         cap = cv2.VideoCapture(stream_url)
+    elif source_type == "비디오 파일":
+        video_path, err = _uploaded_video_path(video_file)
+        if err:
+            yield None, err
+            return
+        cap = cv2.VideoCapture(str(video_path))
     else:
-        cap = cv2.VideoCapture(0)
+        cap = cv2.VideoCapture(webcams.coerce_webcam_index(webcam_index))
 
     if not cap.isOpened():
         yield None, "소스를 열 수 없습니다."
@@ -124,6 +135,18 @@ def capture(source_type: str, youtube_url: str, capture_fps: int, folder_files=N
         yield None, f"중지됨 — {saved}장 저장 완료  →  {OUT_DIR.resolve()}"
     else:
         yield None, f"완료 — {saved}장 저장 완료  →  {OUT_DIR.resolve()}"
+
+
+def _uploaded_video_path(file) -> "tuple[Path | None, str | None]":
+    """gr.File 업로드 결과를 비디오 파일 Path로 정규화한다."""
+    if not file:
+        return None, "비디오 파일을 업로드하세요."
+    path = Path(getattr(file, "name", file))
+    if not path.is_file():
+        return None, f"비디오 파일을 찾을 수 없습니다: {path}"
+    if path.suffix.lower() not in _VIDEO_EXTS:
+        return None, f"지원하지 않는 비디오 형식입니다 (지원 형식: {', '.join(sorted(_VIDEO_EXTS))})"
+    return path, None
 
 
 def _imread_any_path(path: Path) -> "np.ndarray | None":

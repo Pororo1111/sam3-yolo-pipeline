@@ -5,9 +5,12 @@ import cv2
 import numpy as np
 from pathlib import Path
 
+from pipeline import webcams
+
 logging.getLogger("ultralytics").setLevel(logging.ERROR)
 
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tiff", ".tif"}
+_VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v", ".mpeg", ".mpg"}
 
 _stop_event = threading.Event()
 
@@ -57,8 +60,20 @@ def _filter_image_paths(files) -> "list[Path]":
     return sorted(paths, key=lambda p: p.name)
 
 
+def _uploaded_video_path(file) -> "tuple[Path | None, str | None]":
+    """gr.File 업로드 결과를 비디오 파일 Path로 정규화한다."""
+    if not file:
+        return None, "비디오 파일을 업로드하세요."
+    path = Path(getattr(file, "name", file))
+    if not path.is_file():
+        return None, f"비디오 파일을 찾을 수 없습니다: {path}"
+    if path.suffix.lower() not in _VIDEO_EXTS:
+        return None, f"지원하지 않는 비디오 형식입니다 (지원 형식: {', '.join(sorted(_VIDEO_EXTS))})"
+    return path, None
+
+
 def predict(model_path: str, source_type: str, youtube_url: str,
-            conf: float, infer_every: int, folder_files=None):
+            conf: float, infer_every: int, folder_files=None, webcam_index=None, video_file=None):
     """
     Generator — yields (rgb_frame | None, status_str)
     infer_every: N프레임마다 1회 추론, 나머지는 마지막 bbox 재사용
@@ -96,7 +111,13 @@ def predict(model_path: str, source_type: str, youtube_url: str,
         return
 
     if source_type == "웹캠":
-        cap_source = 0
+        cap_source = webcams.coerce_webcam_index(webcam_index)
+    elif source_type == "비디오 파일":
+        cap_source, err = _uploaded_video_path(video_file)
+        if err:
+            yield None, err
+            return
+        cap_source = str(cap_source)
     else:
         if not youtube_url.strip():
             yield None, "YouTube URL을 입력하세요."
