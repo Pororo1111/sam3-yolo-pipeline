@@ -102,10 +102,15 @@ def capture(source_type: str, youtube_url: str, capture_fps: int, folder_files=N
 
     frame_idx = 0
     saved = 0
-    # 미리보기 yield 를 15fps 로 제한 — 다운로드 영상은 cap.read()가 즉시 반환돼
-    # 루프가 폭주하면 제너레이터 출력이 버퍼링되어 실시간 갱신이 안 된다(추론 탭과 동일 패턴).
+    # 미리보기 yield 를 최대 15fps 로 페이싱한다. 파일/일부 YouTube 소스는
+    # cap.read()가 실제 재생 FPS와 무관하게 즉시 반환되므로, 단순히
+    # `now - last_yield >= display_interval`일 때만 yield 하면 짧은 시간 안에
+    # 대부분의 프레임을 건너뛰고 첫 프레임/마지막 프레임만 보일 수 있다.
+    # 저장 프레임을 보여줄 때 필요한 만큼 sleep 해서 Gradio WebSocket이 중간
+    # 미리보기 프레임을 flush 할 시간을 확보한다.
     display_interval = 1.0 / 15
     last_yield = 0.0
+    preview_every_saved = max(1, round(max(1, capture_fps) / 15))
 
     while True:
         if _stop_event.is_set():
@@ -121,9 +126,13 @@ def capture(source_type: str, youtube_url: str, capture_fps: int, folder_files=N
             saved += 1
             _saved_count = saved
 
-            now = time.perf_counter()
-            if now - last_yield >= display_interval:
-                last_yield = now
+            if (saved - 1) % preview_every_saved == 0:
+                now = time.perf_counter()
+                if last_yield:
+                    wait = display_interval - (now - last_yield)
+                    if wait > 0:
+                        time.sleep(wait)
+                last_yield = time.perf_counter()
                 rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 yield rgb, f"{saved}장 저장 중..."
 
