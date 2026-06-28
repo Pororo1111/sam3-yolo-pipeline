@@ -5,7 +5,6 @@ import cv2
 import numpy as np
 from pathlib import Path
 
-from pipeline import webcams
 
 logging.getLogger("ultralytics").setLevel(logging.ERROR)
 
@@ -13,6 +12,75 @@ _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tiff", ".tif"}
 _VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v", ".mpeg", ".mpg"}
 
 _stop_event = threading.Event()
+
+_browser_model = None
+_browser_names = {}
+_browser_frame_idx = 0
+_browser_last_boxes = None
+_browser_last_n_det = 0
+_browser_last_infer_ms = 0.0
+
+
+def start_browser_webcam_predict(model_path: str):
+    """브라우저 webcam 추론 세션을 시작하고 모델을 1회 로딩한다."""
+    global _browser_model, _browser_names, _browser_frame_idx, _browser_last_boxes, _browser_last_n_det, _browser_last_infer_ms
+    _stop_event.clear()
+    if not (model_path or "").strip():
+        model_path = _find_best_pt()
+        if model_path is None:
+            return False, "학습된 모델이 없습니다. 먼저 학습 탭에서 학습을 완료하세요."
+    if not Path(model_path).exists():
+        return False, f"모델 파일 없음: {model_path}"
+    try:
+        from ultralytics import YOLO
+        _browser_model = YOLO(model_path)
+    except ImportError:
+        return False, "ultralytics 패키지를 찾을 수 없습니다."
+    except Exception as e:
+        return False, f"모델 로딩 실패: {e}"
+    _browser_names = _browser_model.names or {}
+    _browser_frame_idx = 0
+    _browser_last_boxes = None
+    _browser_last_n_det = 0
+    _browser_last_infer_ms = 0.0
+    return True, f"브라우저 웹캠 추론 시작 — {model_path}"
+
+
+def predict_browser_webcam_frame(frame, active: bool, conf: float, infer_every: int):
+    """브라우저에서 전달된 webcam 프레임 1장을 추론해 반환한다."""
+    global _browser_frame_idx, _browser_last_boxes, _browser_last_n_det, _browser_last_infer_ms
+    if not active or frame is None:
+        return frame, "대기 중"
+    if _browser_model is None:
+        return frame, "모델이 아직 로딩되지 않았습니다."
+    if _stop_event.is_set():
+        return frame, "중지됨"
+
+    frame_bgr = cv2.cvtColor(frame.astype(np.uint8), cv2.COLOR_RGB2BGR)
+    infer_every = max(1, int(infer_every or 1))
+    if _browser_frame_idx % infer_every == 0:
+        t0 = time.perf_counter()
+        results = _browser_model(frame_bgr, conf=conf, verbose=False)
+        _browser_last_infer_ms = (time.perf_counter() - t0) * 1000
+        _browser_last_boxes = results[0].boxes if results[0].boxes is not None else None
+        _browser_last_n_det = len(_browser_last_boxes) if _browser_last_boxes else 0
+
+    annotated = _overlay_boxes(frame_bgr, _browser_last_boxes, _browser_names)
+    h, w = annotated.shape[:2]
+    if w > 854:
+        scale = 854 / w
+        annotated = cv2.resize(annotated, (854, int(h * scale)), interpolation=cv2.INTER_LINEAR)
+    rgb = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
+    _browser_frame_idx += 1
+    return rgb, (
+        f"브라우저 웹캠 프레임 {_browser_frame_idx}  |  감지 {_browser_last_n_det}개  "
+        f"|  추론 {_browser_last_infer_ms:.0f}ms  |  skip={infer_every}"
+    )
+
+
+def stop_browser_webcam_predict():
+    _stop_event.set()
+    return False, "브라우저 웹캠 추론 중지"
 
 
 def stop():
@@ -111,7 +179,8 @@ def predict(model_path: str, source_type: str, youtube_url: str,
         return
 
     if source_type == "웹캠":
-        cap_source = webcams.coerce_webcam_index(webcam_index)
+        yield None, "웹캠 추론은 UI의 브라우저 웹캠 스트림 핸들러에서 처리합니다. 서버 카메라에는 접근하지 않습니다."
+        return
     elif source_type == "비디오 파일":
         cap_source, err = _uploaded_video_path(video_file)
         if err:
