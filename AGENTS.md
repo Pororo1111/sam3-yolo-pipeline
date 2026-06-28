@@ -8,7 +8,7 @@
 
 ## 프로젝트 개요
 
-YouTube URL · 웹캠 · 로컬 이미지 폴더를 소스로 받아 YOLO 모델을 학습하고 추론하는 end-to-end 파이프라인 WebUI.
+YouTube URL · 웹캠 · 비디오 파일 · 로컬 이미지 폴더를 소스로 받아 YOLO 모델을 학습하고 추론하는 end-to-end 파이프라인 WebUI.
 
 ## 파이프라인 단계
 
@@ -58,6 +58,8 @@ YouTube URL · 웹캠 · 로컬 이미지 폴더를 소스로 받아 YOLO 모델
 yolo-webui/
 ├── AGENTS.md
 ├── app.py                  ← Gradio 메인 진입점
+├── install_cuda.sh         ← CUDA PyTorch 설치용 스크립트
+├── install_cpu.sh          ← CPU PyTorch 설치용 스크립트
 ├── pipeline/
 │   ├── __init__.py
 │   ├── extractor.py        ← Tab 1: 프레임 추출         (완료)
@@ -73,7 +75,10 @@ yolo-webui/
 │   └── dataset.yaml        ← 학습용 데이터셋 설정
 ├── runs/
 │   └── detect/train/weights/best.pt  ← 학습 결과 모델
-├── samples/                ← 참고용 jupyter notebooks
+├── samples/                ← 샘플 입력 파일 + 참고용 jupyter notebooks
+│   ├── sample_url.txt      ← 샘플 YouTube URL
+│   ├── sample.mp4          ← 샘플 비디오
+│   ├── sample_image/       ← 샘플 이미지 폴더
 │   ├── downloader.ipynb
 │   ├── sam3_point.ipynb
 │   ├── sam3_anomaly.ipynb
@@ -84,12 +89,21 @@ yolo-webui/
 
 ---
 
+## 설치 스크립트
+
+- `install_cuda.sh`: `https://download.pytorch.org/whl/cu126` 인덱스에서 CUDA 빌드 `torch`, `torchvision`을 먼저 설치한다.
+- `install_cpu.sh`: `https://download.pytorch.org/whl/cpu` 인덱스에서 CPU 빌드 `torch`, `torchvision`을 먼저 설치한다.
+- 두 스크립트 모두 이후 `requirements.txt`에서 `torch`/`torchvision`/`torchaudio` 항목을 제외한 임시 requirements를 만들어 나머지 패키지를 설치한다. PyTorch 빌드가 뒤에서 덮이는 것을 막기 위한 처리다.
+
+---
+
 ## 단계별 구현 상세
 
 ### Tab 1 — 프레임 추출 (완료)
 **파일**: `pipeline/extractor.py`
 
-- 소스: YouTube URL (`yt-dlp` 스트림 URL 추출) / 웹캠 (`cv2.VideoCapture(0)`) / **이미지 폴더** (로컬 폴더 임포트)
+- 소스: YouTube URL (`yt-dlp` 스트림 URL 추출) / 웹캠 / 비디오 파일 / **이미지 폴더** (로컬 폴더 임포트)
+- YouTube URL, 비디오 파일, 이미지 폴더는 `samples/` 아래 샘플 입력을 카드형 버튼으로 불러올 수 있다.
 - 고정 간격 캡처: `frame_interval = src_fps / capture_fps`
 - **무제한 추출** — 영상 종료 또는 중지 버튼 전까지 계속 저장 (이전 500장 상한 제거)
 - 시작 시 `dataset/raw_frames/`의 기존 `frame_*.jpg` 삭제 후 새로 저장
