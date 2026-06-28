@@ -4,6 +4,8 @@ import threading
 import time
 from pathlib import Path
 
+from pipeline import webcams
+
 import cv2
 import numpy as np
 import requests
@@ -11,6 +13,7 @@ import requests
 OLLAMA_URL = "http://localhost:11434/api/chat"
 
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tiff", ".tif"}
+_VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v", ".mpeg", ".mpg"}
 
 
 def _find_best_pt() -> str | None:
@@ -100,9 +103,24 @@ def reset():
         _last_frame = None
 
 
-def _resolve_source(source_type: str, youtube_url: str):
+def _uploaded_video_path(file) -> "tuple[Path | None, str | None]":
+    """gr.File 업로드 결과를 비디오 파일 Path로 정규화한다."""
+    if not file:
+        return None, "비디오 파일을 업로드하세요."
+    path = Path(getattr(file, "name", file))
+    if not path.is_file():
+        return None, f"비디오 파일을 찾을 수 없습니다: {path}"
+    if path.suffix.lower() not in _VIDEO_EXTS:
+        return None, f"지원하지 않는 비디오 형식입니다 (지원 형식: {', '.join(sorted(_VIDEO_EXTS))})"
+    return path, None
+
+
+def _resolve_source(source_type: str, youtube_url: str, webcam_index=None, video_file=None):
     if source_type == "웹캠":
-        return 0, None
+        return webcams.coerce_webcam_index(webcam_index), None
+    if source_type == "비디오 파일":
+        video_path, err = _uploaded_video_path(video_file)
+        return (str(video_path) if video_path else None), err
     if not youtube_url.strip():
         return None, "YouTube URL을 입력하세요."
     try:
@@ -115,7 +133,7 @@ def _resolve_source(source_type: str, youtube_url: str):
 
 
 def stream(source_type: str, youtube_url: str, model_path: str, conf: float,
-           infer_every: int, folder_files=None):
+           infer_every: int, folder_files=None, webcam_index=None, video_file=None):
     global _last_frame
     _stop_event.clear()
 
@@ -139,7 +157,7 @@ def stream(source_type: str, youtube_url: str, model_path: str, conf: float,
         yield from _stream_folder(model, names, folder_files, conf)
         return
 
-    cap_source, err = _resolve_source(source_type, youtube_url)
+    cap_source, err = _resolve_source(source_type, youtube_url, webcam_index, video_file)
     if err:
         yield None, err
         return

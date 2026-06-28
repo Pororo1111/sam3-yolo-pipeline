@@ -1,7 +1,7 @@
 import html as _html
 
 import gradio as gr
-from pipeline import extractor, labeler, dataset, trainer, inference, zone_monitor, models
+from pipeline import extractor, labeler, dataset, trainer, inference, zone_monitor, models, webcams
 
 
 def _inherit_folder(source_type, current_files, tab1_files):
@@ -11,8 +11,15 @@ def _inherit_folder(source_type, current_files, tab1_files):
     return gr.update()
 
 
-def run_capture(source_type, youtube_url, capture_fps, folder_files):
-    yield from extractor.capture(source_type, youtube_url, int(capture_fps), folder_files)
+def _inherit_video(source_type, current_file, tab1_file):
+    """비디오 파일 선택 시, 업로드가 비어 있으면 Tab 1의 업로드 파일을 물려받는다."""
+    if source_type == "비디오 파일" and not current_file:
+        return gr.update(value=tab1_file or None)
+    return gr.update()
+
+
+def run_capture(source_type, youtube_url, capture_fps, folder_files, webcam_index, video_file):
+    yield from extractor.capture(source_type, youtube_url, int(capture_fps), folder_files, webcam_index, video_file)
 
 
 def load_classes(label_prompts):
@@ -30,6 +37,12 @@ def refresh_model_dropdown():
     """학습된 모델 목록을 다시 스캔해 드롭다운 choices/value 를 갱신한다."""
     choices = models.list_trained_models()
     return gr.update(choices=choices, value=(choices[0][1] if choices else None))
+
+
+def refresh_webcam_dropdown():
+    """웹캠 장비 목록을 다시 감지해 드롭다운 choices/value 를 갱신한다."""
+    choices, value = webcams.refresh_webcam_dropdown()
+    return gr.update(choices=choices, value=value)
 
 
 def _base_model_choices():
@@ -82,6 +95,8 @@ _CSS = (
     "#label_gallery .grid-container { grid-template-columns: repeat(4, minmax(0, 1fr)) !important; }"
 )
 
+_webcam_choices, _webcam_value = webcams.refresh_webcam_dropdown()
+
 with gr.Blocks(title="YOLO 파이프라인") as demo:
 
     gr.Markdown("# YOLO 파이프라인")
@@ -93,7 +108,7 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
 
             with gr.Row():
                 source_type = gr.Radio(
-                    choices=["YouTube URL", "웹캠", "이미지 폴더"],
+                    choices=["YouTube URL", "웹캠", "비디오 파일", "이미지 폴더"],
                     value="YouTube URL",
                     label="소스",
                 )
@@ -108,6 +123,23 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
                 label="YouTube URL",
                 elem_id="tab1_youtube_url",
             )
+            with gr.Row(elem_id="tab1_webcam_row", elem_classes=["src-hidden"]):
+                webcam_index = gr.Dropdown(
+                    choices=_webcam_choices,
+                    value=_webcam_value,
+                    label="웹캠 장비",
+                    info="감지된 카메라를 선택하세요. 목록이 비어 있으면 새로고침을 눌러 재탐색합니다.",
+                    scale=4,
+                )
+                webcam_refresh = gr.Button("웹캠 목록 새로고침", scale=1)
+            with gr.Row(elem_id="tab1_video_row", elem_classes=["src-hidden"]):
+                video_file = gr.File(
+                    label="비디오 파일 업로드",
+                    file_count="single",
+                    type="filepath",
+                    file_types=[".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v", ".mpeg", ".mpg"],
+                    height=120,
+                )
             with gr.Row(elem_id="tab1_folder_row", elem_classes=["src-hidden"]) as folder_row:
                 folder_files = gr.File(
                     label="이미지 폴더 업로드 (폴더 또는 여러 파일 선택)",
@@ -122,8 +154,12 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
                 outputs=None,
                 js="""(s) => {
                     const yt = document.getElementById('tab1_youtube_url');
+                    const wc = document.getElementById('tab1_webcam_row');
+                    const vf = document.getElementById('tab1_video_row');
                     const fr = document.getElementById('tab1_folder_row');
                     if (yt) yt.classList.toggle('src-hidden', s !== 'YouTube URL');
+                    if (wc) wc.classList.toggle('src-hidden', s !== '웹캠');
+                    if (vf) vf.classList.toggle('src-hidden', s !== '비디오 파일');
                     if (fr) fr.classList.toggle('src-hidden', s !== '이미지 폴더');
                 }""",
             )
@@ -137,13 +173,17 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
 
             capture_event = cap_start_btn.click(
                 fn=run_capture,
-                inputs=[source_type, youtube_url, capture_fps, folder_files],
+                inputs=[source_type, youtube_url, capture_fps, folder_files, webcam_index, video_file],
                 outputs=[cap_preview, cap_status],
             )
             cap_stop_btn.click(
                 fn=extractor.stop,
                 outputs=cap_status,
                 cancels=[capture_event],
+            )
+            webcam_refresh.click(
+                fn=refresh_webcam_dropdown,
+                outputs=webcam_index,
             )
 
         # ── SAM3 오토라벨링 ──────────────────────────────────
@@ -438,7 +478,7 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
 
             with gr.Row():
                 inf_source_type = gr.Radio(
-                    choices=["YouTube URL", "웹캠", "이미지 폴더"],
+                    choices=["YouTube URL", "웹캠", "비디오 파일", "이미지 폴더"],
                     value="YouTube URL",
                     label="소스",
                 )
@@ -448,6 +488,23 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
                 label="YouTube URL",
                 elem_id="tab5_youtube_url",
             )
+            with gr.Row(elem_id="tab5_webcam_row", elem_classes=["src-hidden"]):
+                inf_webcam_index = gr.Dropdown(
+                    choices=_webcam_choices,
+                    value=_webcam_value,
+                    label="웹캠 장비",
+                    info="추론에 사용할 카메라를 선택하세요.",
+                    scale=4,
+                )
+                inf_webcam_refresh = gr.Button("웹캠 목록 새로고침", scale=1)
+            with gr.Row(elem_id="tab5_video_row", elem_classes=["src-hidden"]):
+                inf_video_file = gr.File(
+                    label="비디오 파일 업로드 (비우면 Tab 1 업로드 자동 사용)",
+                    file_count="single",
+                    type="filepath",
+                    file_types=[".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v", ".mpeg", ".mpg"],
+                    height=120,
+                )
             with gr.Row(elem_id="tab5_folder_row", elem_classes=["src-hidden"]) as inf_folder_row:
                 inf_folder_files = gr.File(
                     label="이미지 폴더 업로드 (비우면 Tab 1 업로드 자동 사용)",
@@ -462,8 +519,12 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
                 outputs=None,
                 js="""(s) => {
                     const yt = document.getElementById('tab5_youtube_url');
+                    const wc = document.getElementById('tab5_webcam_row');
+                    const vf = document.getElementById('tab5_video_row');
                     const fr = document.getElementById('tab5_folder_row');
                     if (yt) yt.classList.toggle('src-hidden', s !== 'YouTube URL');
+                    if (wc) wc.classList.toggle('src-hidden', s !== '웹캠');
+                    if (vf) vf.classList.toggle('src-hidden', s !== '비디오 파일');
                     if (fr) fr.classList.toggle('src-hidden', s !== '이미지 폴더');
                 }""",
             )
@@ -471,6 +532,12 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
                 fn=_inherit_folder,
                 inputs=[inf_source_type, inf_folder_files, folder_files],
                 outputs=inf_folder_files,
+                show_progress="hidden",
+            )
+            inf_source_type.change(
+                fn=_inherit_video,
+                inputs=[inf_source_type, inf_video_file, video_file],
+                outputs=inf_video_file,
                 show_progress="hidden",
             )
 
@@ -483,7 +550,7 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
 
             inf_event = inf_start_btn.click(
                 fn=inference.predict,
-                inputs=[inf_model_path, inf_source_type, inf_youtube_url, inf_conf, inf_skip, inf_folder_files],
+                inputs=[inf_model_path, inf_source_type, inf_youtube_url, inf_conf, inf_skip, inf_folder_files, inf_webcam_index, inf_video_file],
                 outputs=[inf_preview, inf_status],
             )
             inf_stop_btn.click(
@@ -493,6 +560,10 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
             inf_model_refresh.click(
                 fn=refresh_model_dropdown,
                 outputs=inf_model_path,
+            )
+            inf_webcam_refresh.click(
+                fn=refresh_webcam_dropdown,
+                outputs=inf_webcam_index,
             )
 
 
@@ -524,7 +595,7 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
 
             with gr.Row():
                 zm_source_type = gr.Radio(
-                    choices=["YouTube URL", "웹캠", "이미지 폴더"],
+                    choices=["YouTube URL", "웹캠", "비디오 파일", "이미지 폴더"],
                     value="YouTube URL",
                     label="소스",
                 )
@@ -534,6 +605,23 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
                 label="YouTube URL",
                 elem_id="tab6_youtube_url",
             )
+            with gr.Row(elem_id="tab6_webcam_row", elem_classes=["src-hidden"]):
+                zm_webcam_index = gr.Dropdown(
+                    choices=_webcam_choices,
+                    value=_webcam_value,
+                    label="웹캠 장비",
+                    info="침입 감시에 사용할 카메라를 선택하세요.",
+                    scale=4,
+                )
+                zm_webcam_refresh = gr.Button("웹캠 목록 새로고침", scale=1)
+            with gr.Row(elem_id="tab6_video_row", elem_classes=["src-hidden"]):
+                zm_video_file = gr.File(
+                    label="비디오 파일 업로드 (비우면 Tab 1 업로드 자동 사용)",
+                    file_count="single",
+                    type="filepath",
+                    file_types=[".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v", ".mpeg", ".mpg"],
+                    height=120,
+                )
             with gr.Row(elem_id="tab6_folder_row", elem_classes=["src-hidden"]) as zm_folder_row:
                 zm_folder_files = gr.File(
                     label="이미지 폴더 업로드 (비우면 Tab 1 업로드 자동 사용)",
@@ -548,8 +636,12 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
                 outputs=None,
                 js="""(s) => {
                     const yt = document.getElementById('tab6_youtube_url');
+                    const wc = document.getElementById('tab6_webcam_row');
+                    const vf = document.getElementById('tab6_video_row');
                     const fr = document.getElementById('tab6_folder_row');
                     if (yt) yt.classList.toggle('src-hidden', s !== 'YouTube URL');
+                    if (wc) wc.classList.toggle('src-hidden', s !== '웹캠');
+                    if (vf) vf.classList.toggle('src-hidden', s !== '비디오 파일');
                     if (fr) fr.classList.toggle('src-hidden', s !== '이미지 폴더');
                 }""",
             )
@@ -557,6 +649,12 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
                 fn=_inherit_folder,
                 inputs=[zm_source_type, zm_folder_files, folder_files],
                 outputs=zm_folder_files,
+                show_progress="hidden",
+            )
+            zm_source_type.change(
+                fn=_inherit_video,
+                inputs=[zm_source_type, zm_video_file, video_file],
+                outputs=zm_video_file,
                 show_progress="hidden",
             )
 
@@ -590,7 +688,7 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
 
             zm_stream_event = zm_start_btn.click(
                 fn=zone_monitor.stream,
-                inputs=[zm_source_type, zm_youtube_url, zm_model_path, zm_conf, zm_skip, zm_folder_files],
+                inputs=[zm_source_type, zm_youtube_url, zm_model_path, zm_conf, zm_skip, zm_folder_files, zm_webcam_index, zm_video_file],
                 outputs=[zm_preview, zm_stream_status],
             )
             zm_stop_btn.click(
@@ -605,6 +703,10 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
             zm_model_refresh.click(
                 fn=refresh_model_dropdown,
                 outputs=zm_model_path,
+            )
+            zm_webcam_refresh.click(
+                fn=refresh_webcam_dropdown,
+                outputs=zm_webcam_index,
             )
 
     # 데이터셋 단계 진입 시 클래스 목록 로드 (네이티브 탭 select 이벤트).
