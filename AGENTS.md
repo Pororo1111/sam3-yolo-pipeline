@@ -1,5 +1,11 @@
 # YOLO 파이프라인 Gradio WebUI
 
+## 응답 언어
+
+- 모든 응답은 항상 한국어로 작성한다.
+
+---
+
 ## 프로젝트 개요
 
 YouTube URL · 웹캠 · 로컬 이미지 폴더를 소스로 받아 YOLO 모델을 학습하고 추론하는 end-to-end 파이프라인 WebUI.
