@@ -1,7 +1,16 @@
 import html as _html
+import urllib.parse as _urlparse
+from pathlib import Path
 
 import gradio as gr
 from pipeline import extractor, labeler, dataset, trainer, inference, zone_monitor, models, webcams
+
+
+SAMPLES_DIR = Path("samples")
+SAMPLE_URL_PATH = SAMPLES_DIR / "sample_url.txt"
+SAMPLE_VIDEO_PATH = SAMPLES_DIR / "sample.mp4"
+SAMPLE_IMAGE_DIR = SAMPLES_DIR / "sample_image"
+SAMPLE_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tiff", ".tif"}
 
 
 def _inherit_folder(source_type, current_files, tab1_files):
@@ -18,8 +27,171 @@ def _inherit_video(source_type, current_file, tab1_file):
     return gr.update()
 
 
+def load_sample_youtube_url():
+    """samples/sample_url.txt의 URL을 YouTube 입력칸에 채운다."""
+    if not SAMPLE_URL_PATH.exists():
+        return gr.update(), f"샘플 URL 파일을 찾을 수 없습니다: {SAMPLE_URL_PATH}"
+    url = SAMPLE_URL_PATH.read_text(encoding="utf-8", errors="ignore").strip()
+    if not url:
+        return gr.update(), f"샘플 URL 파일이 비어 있습니다: {SAMPLE_URL_PATH}"
+    return gr.update(value=url), "샘플 YouTube URL을 불러왔습니다."
+
+
+def load_sample_video_file():
+    """samples/sample.mp4를 비디오 파일 입력에 채운다."""
+    if not SAMPLE_VIDEO_PATH.exists():
+        return gr.update(), f"샘플 비디오 파일을 찾을 수 없습니다: {SAMPLE_VIDEO_PATH}"
+    return gr.update(value=str(SAMPLE_VIDEO_PATH)), "샘플 비디오 파일을 선택했습니다."
+
+
+def load_sample_image_folder():
+    """samples/sample_image 폴더의 이미지들을 이미지 폴더 입력에 채운다."""
+    if not SAMPLE_IMAGE_DIR.exists():
+        return gr.update(), f"샘플 이미지 폴더를 찾을 수 없습니다: {SAMPLE_IMAGE_DIR}"
+    files = sorted(
+        str(path)
+        for path in SAMPLE_IMAGE_DIR.iterdir()
+        if path.is_file() and path.suffix.lower() in SAMPLE_IMAGE_EXTS
+    )
+    if not files:
+        return gr.update(), f"샘플 이미지 폴더에 이미지 파일이 없습니다: {SAMPLE_IMAGE_DIR}"
+    return gr.update(value=files), f"샘플 이미지 폴더를 선택했습니다. ({len(files)}장)"
+
+
 def run_capture(source_type, youtube_url, capture_fps, folder_files, webcam_index, video_file):
-    yield from extractor.capture(source_type, youtube_url, int(capture_fps), folder_files, webcam_index, video_file)
+    emit_preview = source_type == "이미지 폴더"
+    for frame, status in extractor.capture(
+        source_type,
+        youtube_url,
+        int(capture_fps),
+        folder_files,
+        webcam_index,
+        video_file,
+        emit_preview=emit_preview,
+    ):
+        yield (frame if emit_preview else gr.update(), status)
+
+
+def _youtube_embed_html(url: str) -> tuple[str | None, str | None]:
+    """일반 YouTube URL에서 iframe embed HTML을 만든다."""
+    raw = (url or "").strip()
+    if not raw:
+        return None, "YouTube URL을 입력하세요."
+
+    parsed = _urlparse.urlparse(raw)
+    host = parsed.netloc.lower().removeprefix("www.")
+    video_id = ""
+
+    if host == "youtu.be":
+        video_id = parsed.path.strip("/").split("/")[0]
+    elif "youtube.com" in host:
+        if parsed.path == "/watch":
+            video_id = _urlparse.parse_qs(parsed.query).get("v", [""])[0]
+        elif parsed.path.startswith("/shorts/") or parsed.path.startswith("/embed/") or parsed.path.startswith("/live/"):
+            parts = [p for p in parsed.path.split("/") if p]
+            if len(parts) >= 2:
+                video_id = parts[1]
+
+    if not video_id:
+        return None, "지원하지 않는 YouTube URL 형식입니다."
+
+    safe_id = _html.escape(video_id, quote=True)
+    src = f"https://www.youtube.com/embed/{safe_id}?autoplay=1&mute=1&playsinline=1"
+    return (
+        '<div class="youtube-preview">'
+        f'<iframe src="{src}" title="YouTube 미리보기" '
+        'allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" '
+        'allowfullscreen></iframe>'
+        "</div>"
+    ), None
+
+
+def _local_video_html(path: str) -> str:
+    """로컬 비디오를 Gradio 변환 없이 브라우저 video 태그로 표시한다."""
+    encoded = _urlparse.quote(str(Path(path).resolve()), safe="")
+    src = f"/gradio_api/file={encoded}"
+    return (
+        '<div class="local-video-preview">'
+        f'<video src="{src}" controls autoplay muted playsinline></video>'
+        "</div>"
+    )
+
+
+def prepare_capture_preview(source_type, youtube_url, video_file):
+    """캡처 전에 브라우저 네이티브 비디오 미리보기 영역을 소스별로 전환한다."""
+    image_visible = source_type == "이미지 폴더"
+    if source_type == "YouTube URL":
+        html, err = _youtube_embed_html(youtube_url)
+        if err:
+            return (
+                gr.update(value="", visible=False),
+                gr.update(value=None, visible=False),
+                gr.update(visible=False),
+                gr.update(visible=image_visible),
+                err,
+            )
+        return (
+            gr.update(value=html, visible=True),
+            gr.update(value=None, visible=False),
+            gr.update(visible=False),
+            gr.update(visible=False),
+            "YouTube 미리보기 준비 완료. 캡처를 시작합니다.",
+        )
+
+    if source_type == "비디오 파일":
+        src, err = extractor.video_preview_source(source_type, youtube_url, video_file)
+        if err:
+            return (
+                gr.update(value="", visible=False),
+                gr.update(value="", visible=False),
+                gr.update(visible=False),
+                gr.update(visible=image_visible),
+                err,
+            )
+        return (
+            gr.update(value="", visible=False),
+            gr.update(value=_local_video_html(src), visible=True),
+            gr.update(visible=False),
+            gr.update(visible=False),
+            "비디오 미리보기 준비 완료. 캡처를 시작합니다.",
+        )
+
+    if source_type == "웹캠":
+        return (
+            gr.update(value="", visible=False),
+            gr.update(value="", visible=False),
+            gr.update(visible=True),
+            gr.update(visible=False),
+            "웹캠 미리보기를 준비했습니다. 브라우저 권한을 허용하세요.",
+        )
+
+    return (
+        gr.update(value="", visible=False),
+        gr.update(value="", visible=False),
+        gr.update(visible=False),
+        gr.update(visible=True),
+        "이미지 폴더 캡처를 시작합니다.",
+    )
+
+
+def stop_capture_and_reset():
+    """캡처 중지 후 미리보기 영역을 초기 상태로 되돌린다."""
+    status = extractor.stop()
+    return (
+        gr.update(value="", visible=False),
+        gr.update(value="", visible=False),
+        gr.update(value=None, visible=False),
+        gr.update(value=None, visible=True),
+        status,
+    )
+
+
+def run_inference(model_path, source_type, youtube_url, conf, infer_every, folder_files, webcam_index, video_file):
+    yield from inference.predict(model_path, source_type, youtube_url, conf, infer_every, folder_files, webcam_index, video_file)
+
+
+def run_zone_stream(source_type, youtube_url, model_path, conf, infer_every, folder_files, webcam_index, video_file):
+    yield from zone_monitor.stream(source_type, youtube_url, model_path, conf, infer_every, folder_files, webcam_index, video_file)
 
 
 def load_classes(label_prompts):
@@ -43,6 +215,7 @@ def refresh_webcam_dropdown():
     """웹캠 장비 목록을 다시 감지해 드롭다운 choices/value 를 갱신한다."""
     choices, value = webcams.refresh_webcam_dropdown()
     return gr.update(choices=choices, value=value)
+
 
 
 def _base_model_choices():
@@ -93,9 +266,18 @@ _CSS = (
     # 미리보기 갤러리: 항상 4열 격자로 고정. Gradio는 이미지 수에 맞춰 --grid-cols를
     # 줄여(1장이면 1열) 이미지가 칸 전체로 커지므로, grid-template-columns를 4열로 강제.
     "#label_gallery .grid-container { grid-template-columns: repeat(4, minmax(0, 1fr)) !important; }"
+    "#cap_webcam_preview video { max-height: 520px; object-fit: contain; background: #111; }"
+    ".youtube-preview { width: 100%; aspect-ratio: 16 / 9; background: #111; }"
+    ".youtube-preview iframe { width: 100%; height: 100%; border: 0; display: block; }"
+    ".local-video-preview { width: 100%; aspect-ratio: 16 / 9; background: #111; }"
+    ".local-video-preview video { width: 100%; height: 100%; object-fit: contain; display: block; }"
+    ".sample-card button { min-height: 72px; border: 1px solid #d4d4d8 !important; "
+    "background: #fff !important; color: #18181b !important; text-align: left; "
+    "justify-content: flex-start; box-shadow: 0 1px 2px rgba(0,0,0,.06); }"
 )
 
 _webcam_choices, _webcam_value = webcams.refresh_webcam_dropdown()
+
 
 with gr.Blocks(title="YOLO 파이프라인") as demo:
 
@@ -123,6 +305,11 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
                 label="YouTube URL",
                 elem_id="tab1_youtube_url",
             )
+            with gr.Row(elem_id="tab1_youtube_sample_row"):
+                youtube_sample_btn = gr.Button(
+                    "샘플 YouTube URL 사용\nsamples/sample_url.txt",
+                    elem_classes=["sample-card"],
+                )
             with gr.Row(elem_id="tab1_webcam_row", elem_classes=["src-hidden"]):
                 webcam_index = gr.Dropdown(
                     choices=_webcam_choices,
@@ -140,12 +327,22 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
                     file_types=[".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v", ".mpeg", ".mpg"],
                     height=120,
                 )
+            with gr.Row(elem_id="tab1_video_sample_row", elem_classes=["src-hidden"]):
+                video_sample_btn = gr.Button(
+                    "샘플 비디오 파일 사용\nsamples/sample.mp4",
+                    elem_classes=["sample-card"],
+                )
             with gr.Row(elem_id="tab1_folder_row", elem_classes=["src-hidden"]) as folder_row:
                 folder_files = gr.File(
                     label="이미지 폴더 업로드 (폴더 또는 여러 파일 선택)",
                     file_count="directory",
                     type="filepath",
                     height=200,
+                )
+            with gr.Row(elem_id="tab1_folder_sample_row", elem_classes=["src-hidden"]):
+                folder_sample_btn = gr.Button(
+                    "샘플 이미지 폴더 사용\nsamples/sample_image",
+                    elem_classes=["sample-card"],
                 )
 
             source_type.change(
@@ -154,31 +351,71 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
                 outputs=None,
                 js="""(s) => {
                     const yt = document.getElementById('tab1_youtube_url');
+                    const ys = document.getElementById('tab1_youtube_sample_row');
                     const wc = document.getElementById('tab1_webcam_row');
                     const vf = document.getElementById('tab1_video_row');
+                    const vs = document.getElementById('tab1_video_sample_row');
                     const fr = document.getElementById('tab1_folder_row');
+                    const fs = document.getElementById('tab1_folder_sample_row');
                     if (yt) yt.classList.toggle('src-hidden', s !== 'YouTube URL');
+                    if (ys) ys.classList.toggle('src-hidden', s !== 'YouTube URL');
                     if (wc) wc.classList.toggle('src-hidden', s !== '웹캠');
                     if (vf) vf.classList.toggle('src-hidden', s !== '비디오 파일');
+                    if (vs) vs.classList.toggle('src-hidden', s !== '비디오 파일');
                     if (fr) fr.classList.toggle('src-hidden', s !== '이미지 폴더');
+                    if (fs) fs.classList.toggle('src-hidden', s !== '이미지 폴더');
                 }""",
             )
-
             with gr.Row():
                 cap_start_btn = gr.Button("캡처 시작", variant="primary")
                 cap_stop_btn  = gr.Button("중지", variant="stop")
 
-            cap_preview = gr.Image(label="실시간 미리보기", type="numpy", streaming=True)
+            cap_youtube_preview = gr.HTML(
+                label="YouTube 미리보기",
+                visible=False,
+            )
+            cap_video_preview = gr.HTML(
+                label="영상 미리보기",
+                visible=False,
+                elem_id="cap_video_preview",
+            )
+            cap_webcam_preview = gr.Video(
+                label="웹캠 미리보기",
+                sources=["webcam"],
+                streaming=True,
+                autoplay=True,
+                visible=False,
+                elem_id="cap_webcam_preview",
+            )
+            cap_preview = gr.Image(label="이미지 폴더 미리보기", type="numpy", streaming=True)
             cap_status  = gr.Textbox(label="상태", interactive=False)
 
-            capture_event = cap_start_btn.click(
+            youtube_sample_btn.click(
+                fn=load_sample_youtube_url,
+                outputs=[youtube_url, cap_status],
+            )
+            video_sample_btn.click(
+                fn=load_sample_video_file,
+                outputs=[video_file, cap_status],
+            )
+            folder_sample_btn.click(
+                fn=load_sample_image_folder,
+                outputs=[folder_files, cap_status],
+            )
+
+            cap_prepare_event = cap_start_btn.click(
+                fn=prepare_capture_preview,
+                inputs=[source_type, youtube_url, video_file],
+                outputs=[cap_youtube_preview, cap_video_preview, cap_webcam_preview, cap_preview, cap_status],
+            )
+            capture_event = cap_prepare_event.then(
                 fn=run_capture,
                 inputs=[source_type, youtube_url, capture_fps, folder_files, webcam_index, video_file],
                 outputs=[cap_preview, cap_status],
             )
             cap_stop_btn.click(
-                fn=extractor.stop,
-                outputs=cap_status,
+                fn=stop_capture_and_reset,
+                outputs=[cap_youtube_preview, cap_video_preview, cap_webcam_preview, cap_preview, cap_status],
                 cancels=[capture_event],
             )
             webcam_refresh.click(
@@ -488,6 +725,11 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
                 label="YouTube URL",
                 elem_id="tab5_youtube_url",
             )
+            with gr.Row(elem_id="tab5_youtube_sample_row"):
+                inf_youtube_sample_btn = gr.Button(
+                    "샘플 YouTube URL 사용\nsamples/sample_url.txt",
+                    elem_classes=["sample-card"],
+                )
             with gr.Row(elem_id="tab5_webcam_row", elem_classes=["src-hidden"]):
                 inf_webcam_index = gr.Dropdown(
                     choices=_webcam_choices,
@@ -505,12 +747,22 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
                     file_types=[".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v", ".mpeg", ".mpg"],
                     height=120,
                 )
+            with gr.Row(elem_id="tab5_video_sample_row", elem_classes=["src-hidden"]):
+                inf_video_sample_btn = gr.Button(
+                    "샘플 비디오 파일 사용\nsamples/sample.mp4",
+                    elem_classes=["sample-card"],
+                )
             with gr.Row(elem_id="tab5_folder_row", elem_classes=["src-hidden"]) as inf_folder_row:
                 inf_folder_files = gr.File(
                     label="이미지 폴더 업로드 (비우면 Tab 1 업로드 자동 사용)",
                     file_count="directory",
                     type="filepath",
                     height=200,
+                )
+            with gr.Row(elem_id="tab5_folder_sample_row", elem_classes=["src-hidden"]):
+                inf_folder_sample_btn = gr.Button(
+                    "샘플 이미지 폴더 사용\nsamples/sample_image",
+                    elem_classes=["sample-card"],
                 )
 
             inf_source_type.change(
@@ -519,13 +771,19 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
                 outputs=None,
                 js="""(s) => {
                     const yt = document.getElementById('tab5_youtube_url');
+                    const ys = document.getElementById('tab5_youtube_sample_row');
                     const wc = document.getElementById('tab5_webcam_row');
                     const vf = document.getElementById('tab5_video_row');
+                    const vs = document.getElementById('tab5_video_sample_row');
                     const fr = document.getElementById('tab5_folder_row');
+                    const fs = document.getElementById('tab5_folder_sample_row');
                     if (yt) yt.classList.toggle('src-hidden', s !== 'YouTube URL');
+                    if (ys) ys.classList.toggle('src-hidden', s !== 'YouTube URL');
                     if (wc) wc.classList.toggle('src-hidden', s !== '웹캠');
                     if (vf) vf.classList.toggle('src-hidden', s !== '비디오 파일');
+                    if (vs) vs.classList.toggle('src-hidden', s !== '비디오 파일');
                     if (fr) fr.classList.toggle('src-hidden', s !== '이미지 폴더');
+                    if (fs) fs.classList.toggle('src-hidden', s !== '이미지 폴더');
                 }""",
             )
             inf_source_type.change(
@@ -548,8 +806,21 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
             inf_preview = gr.Image(label="추론 결과", type="numpy", streaming=True)
             inf_status  = gr.Textbox(label="상태", interactive=False)
 
+            inf_youtube_sample_btn.click(
+                fn=load_sample_youtube_url,
+                outputs=[inf_youtube_url, inf_status],
+            )
+            inf_video_sample_btn.click(
+                fn=load_sample_video_file,
+                outputs=[inf_video_file, inf_status],
+            )
+            inf_folder_sample_btn.click(
+                fn=load_sample_image_folder,
+                outputs=[inf_folder_files, inf_status],
+            )
+
             inf_event = inf_start_btn.click(
-                fn=inference.predict,
+                fn=run_inference,
                 inputs=[inf_model_path, inf_source_type, inf_youtube_url, inf_conf, inf_skip, inf_folder_files, inf_webcam_index, inf_video_file],
                 outputs=[inf_preview, inf_status],
             )
@@ -605,6 +876,11 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
                 label="YouTube URL",
                 elem_id="tab6_youtube_url",
             )
+            with gr.Row(elem_id="tab6_youtube_sample_row"):
+                zm_youtube_sample_btn = gr.Button(
+                    "샘플 YouTube URL 사용\nsamples/sample_url.txt",
+                    elem_classes=["sample-card"],
+                )
             with gr.Row(elem_id="tab6_webcam_row", elem_classes=["src-hidden"]):
                 zm_webcam_index = gr.Dropdown(
                     choices=_webcam_choices,
@@ -622,12 +898,22 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
                     file_types=[".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v", ".mpeg", ".mpg"],
                     height=120,
                 )
+            with gr.Row(elem_id="tab6_video_sample_row", elem_classes=["src-hidden"]):
+                zm_video_sample_btn = gr.Button(
+                    "샘플 비디오 파일 사용\nsamples/sample.mp4",
+                    elem_classes=["sample-card"],
+                )
             with gr.Row(elem_id="tab6_folder_row", elem_classes=["src-hidden"]) as zm_folder_row:
                 zm_folder_files = gr.File(
                     label="이미지 폴더 업로드 (비우면 Tab 1 업로드 자동 사용)",
                     file_count="directory",
                     type="filepath",
                     height=200,
+                )
+            with gr.Row(elem_id="tab6_folder_sample_row", elem_classes=["src-hidden"]):
+                zm_folder_sample_btn = gr.Button(
+                    "샘플 이미지 폴더 사용\nsamples/sample_image",
+                    elem_classes=["sample-card"],
                 )
 
             zm_source_type.change(
@@ -636,13 +922,19 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
                 outputs=None,
                 js="""(s) => {
                     const yt = document.getElementById('tab6_youtube_url');
+                    const ys = document.getElementById('tab6_youtube_sample_row');
                     const wc = document.getElementById('tab6_webcam_row');
                     const vf = document.getElementById('tab6_video_row');
+                    const vs = document.getElementById('tab6_video_sample_row');
                     const fr = document.getElementById('tab6_folder_row');
+                    const fs = document.getElementById('tab6_folder_sample_row');
                     if (yt) yt.classList.toggle('src-hidden', s !== 'YouTube URL');
+                    if (ys) ys.classList.toggle('src-hidden', s !== 'YouTube URL');
                     if (wc) wc.classList.toggle('src-hidden', s !== '웹캠');
                     if (vf) vf.classList.toggle('src-hidden', s !== '비디오 파일');
+                    if (vs) vs.classList.toggle('src-hidden', s !== '비디오 파일');
                     if (fr) fr.classList.toggle('src-hidden', s !== '이미지 폴더');
+                    if (fs) fs.classList.toggle('src-hidden', s !== '이미지 폴더');
                 }""",
             )
             zm_source_type.change(
@@ -664,6 +956,19 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
 
             zm_preview = gr.Image(label="실시간 영상", type="numpy", streaming=True)
             zm_stream_status = gr.Textbox(label="상태", interactive=False)
+
+            zm_youtube_sample_btn.click(
+                fn=load_sample_youtube_url,
+                outputs=[zm_youtube_url, zm_stream_status],
+            )
+            zm_video_sample_btn.click(
+                fn=load_sample_video_file,
+                outputs=[zm_video_file, zm_stream_status],
+            )
+            zm_folder_sample_btn.click(
+                fn=load_sample_image_folder,
+                outputs=[zm_folder_files, zm_stream_status],
+            )
 
             gr.Markdown("---")
             gr.Markdown("#### 영역 설정 (로컬 LLM)")
@@ -687,7 +992,7 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
             zm_llm_log      = gr.Code(label="LLM 응답 (JSON)", language="json", interactive=False)
 
             zm_stream_event = zm_start_btn.click(
-                fn=zone_monitor.stream,
+                fn=run_zone_stream,
                 inputs=[zm_source_type, zm_youtube_url, zm_model_path, zm_conf, zm_skip, zm_folder_files, zm_webcam_index, zm_video_file],
                 outputs=[zm_preview, zm_stream_status],
             )
@@ -734,4 +1039,8 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
 if __name__ == "__main__":
     # 시작 시 학습용 베이스 모델(yolo26n.pt)이 models/ 에 없으면 자동 다운로드
     models.ensure_models()
-    demo.queue().launch(theme=gr.themes.Default(), css=_CSS)
+    demo.queue().launch(
+        theme=gr.themes.Default(),
+        css=_CSS,
+        allowed_paths=[str(SAMPLES_DIR.resolve())],
+    )

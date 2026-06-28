@@ -14,7 +14,6 @@ _VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v", ".mpeg", ".mpg"}
 
 _stop_event = threading.Event()
 
-
 def stop():
     _stop_event.set()
 

@@ -89,7 +89,6 @@ _zone_lock = threading.Lock()
 _last_frame: np.ndarray | None = None
 _last_frame_lock = threading.Lock()
 
-
 def stop():
     _stop_event.set()
 

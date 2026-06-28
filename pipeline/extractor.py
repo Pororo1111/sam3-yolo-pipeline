@@ -12,9 +12,12 @@ OUT_DIR = Path("dataset/raw_frames")
 
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tiff", ".tif"}
 _VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v", ".mpeg", ".mpg"}
+_MAX_PREVIEW_FPS = 30
+_STREAM_CACHE_TTL = 600
 
 _stop_event = threading.Event()
 _saved_count = 0  # 현재 캡처 세션에서 저장한 장수 (중지 시 최종 메시지에 사용)
+_stream_url_cache: dict[str, tuple[float, str]] = {}
 
 
 def stop():
@@ -29,6 +32,11 @@ def stop():
 
 
 def _get_youtube_stream_url(url: str) -> str:
+    cached = _stream_url_cache.get(url)
+    now = time.time()
+    if cached and now - cached[0] < _STREAM_CACHE_TTL:
+        return cached[1]
+
     ydl_opts = {
         "format": "best[ext=mp4]/bestvideo[ext=mp4]/best",
         "quiet": True,
@@ -42,11 +50,43 @@ def _get_youtube_stream_url(url: str) -> str:
             # pick best mp4
             mp4 = [f for f in formats if f.get("ext") == "mp4" and f.get("url")]
             if mp4:
-                return mp4[-1]["url"]
-        return info["url"]
+                stream_url = mp4[-1]["url"]
+                _stream_url_cache[url] = (now, stream_url)
+                return stream_url
+        stream_url = info["url"]
+        _stream_url_cache[url] = (now, stream_url)
+        return stream_url
 
 
-def capture(source_type: str, youtube_url: str, capture_fps: int, folder_files=None, webcam_index=None, video_file=None):
+def video_preview_source(source_type: str, youtube_url: str, video_file=None):
+    """Tab 1의 브라우저 비디오 미리보기에 사용할 src를 반환한다."""
+    if source_type == "YouTube URL":
+        url = (youtube_url or "").strip()
+        if not url:
+            return None, "YouTube URL을 입력하세요."
+        try:
+            return _get_youtube_stream_url(url), None
+        except Exception as e:
+            return None, f"미리보기 URL 추출 실패: {e}"
+
+    if source_type == "비디오 파일":
+        video_path, err = _uploaded_video_path(video_file)
+        if err:
+            return None, err
+        return str(video_path), None
+
+    return None, None
+
+
+def capture(
+    source_type: str,
+    youtube_url: str,
+    capture_fps: int,
+    folder_files=None,
+    webcam_index=None,
+    video_file=None,
+    emit_preview: bool = True,
+):
     """
     Generator — yields (rgb_frame | None, status_str) until done or stopped.
     source_type: "YouTube URL" | "웹캠" | "비디오 파일" | "이미지 폴더"
@@ -102,20 +142,27 @@ def capture(source_type: str, youtube_url: str, capture_fps: int, folder_files=N
 
     frame_idx = 0
     saved = 0
-    # 미리보기 yield 를 최대 15fps 로 페이싱한다. 파일/일부 YouTube 소스는
-    # cap.read()가 실제 재생 FPS와 무관하게 즉시 반환되므로, 캡처 루프가
-    # UI 전송보다 훨씬 빠르게 끝나면 브라우저에는 첫 프레임/마지막 프레임만
-    # 보일 수 있다. 따라서 미리보기 프레임 사이를 실제 캡처 FPS 기준으로
-    # 늦춰 Gradio WebSocket이 중간 프레임을 flush 할 시간을 확보한다.
-    preview_fps = min(15, max(1, int(capture_fps)))
+    # 저장 FPS와 미리보기 FPS를 분리한다. 저장은 capture_fps를 따르되,
+    # 화면 미리보기는 소스 FPS에 맞춰 최대 30fps까지 전송한다.
+    preview_fps = max(1, min(_MAX_PREVIEW_FPS, round(src_fps)))
     display_interval = 1.0 / preview_fps
+    status_interval = 0.5
     last_yield = 0.0
     last_preview_rgb = None
-    preview_every_saved = max(1, round(max(1, capture_fps) / preview_fps))
+    # 일부 YouTube/파일 소스는 cap.read()가 실제 재생 속도보다 빠르게 반환된다.
+    # UI가 중간 프레임을 받을 수 있도록 원본 FPS 기준으로 읽기 루프도 페이싱한다.
+    read_interval = 1.0 / min(max(src_fps, 1.0), 30.0)
+    next_read_at = time.perf_counter()
 
     while True:
         if _stop_event.is_set():
             break
+
+        now = time.perf_counter()
+        wait = next_read_at - now
+        if wait > 0:
+            time.sleep(wait)
+        next_read_at = max(next_read_at + read_interval, time.perf_counter())
 
         ret, frame = cap.read()
         if not ret:
@@ -127,16 +174,16 @@ def capture(source_type: str, youtube_url: str, capture_fps: int, folder_files=N
             saved += 1
             _saved_count = saved
 
-            if (saved - 1) % preview_every_saved == 0:
-                now = time.perf_counter()
-                if last_yield:
-                    wait = display_interval - (now - last_yield)
-                    if wait > 0:
-                        time.sleep(wait)
-                last_yield = time.perf_counter()
+        now = time.perf_counter()
+        interval = display_interval if emit_preview else status_interval
+        if last_yield == 0.0 or now - last_yield >= interval:
+            last_yield = now
+            if emit_preview:
                 rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 last_preview_rgb = rgb
-                yield rgb, f"{saved}장 저장 중..."
+                yield rgb, f"{saved}장 저장 중...  |  미리보기 {preview_fps}fps"
+            else:
+                yield None, f"{saved}장 저장 중...  |  비디오 미리보기 사용"
 
         frame_idx += 1
 
@@ -180,7 +227,7 @@ def _filter_image_paths(files) -> "list[Path]":
 
 
 def _import_from_files(files):
-    """gr.File 업로드된 이미지 파일들을 raw_frames로 복사."""
+    """gr.File 업로드된 이미지 파일들을 raw_frames로 빠르게 복사/변환."""
     global _saved_count
     images = _filter_image_paths(files)
 
@@ -196,24 +243,41 @@ def _import_from_files(files):
     yield None, f"{total}장 발견 — 복사 시작..."
 
     copied = 0
+    last_yield = 0.0
+    preview_interval = 0.5
+    last_preview_rgb = None
+
     for idx, src_path in enumerate(images):
         if _stop_event.is_set():
-            yield None, f"중지됨 — {copied}장 복사 완료  →  {OUT_DIR.resolve()}"
+            yield last_preview_rgb, f"중지됨 — {copied}장 복사 완료  →  {OUT_DIR.resolve()}"
             return
 
         dst_path = OUT_DIR / f"frame_{copied:05d}.jpg"
 
         try:
-            bgr = _imread_any_path(src_path)
-            if bgr is None:
-                yield None, f"{idx + 1}/{total}  건너뜀 (읽기 실패): {src_path.name}"
-                continue
-            cv2.imwrite(str(dst_path), bgr)
+            bgr = None
+            if src_path.suffix.lower() in {".jpg", ".jpeg"}:
+                shutil.copyfile(src_path, dst_path)
+            else:
+                bgr = _imread_any_path(src_path)
+                if bgr is None:
+                    yield last_preview_rgb, f"{idx + 1}/{total}  건너뜀 (읽기 실패): {src_path.name}"
+                    continue
+                cv2.imwrite(str(dst_path), bgr)
+
             copied += 1
             _saved_count = copied
-            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-            yield rgb, f"{copied} / {total} 복사 완료"
-        except Exception as e:
-            yield None, f"{src_path.name} 처리 실패: {e}"
 
-    yield None, f"완료 — {copied}장 복사  →  {OUT_DIR.resolve()}"
+            now = time.perf_counter()
+            should_yield = copied == 1 or copied == total or now - last_yield >= preview_interval
+            if should_yield:
+                last_yield = now
+                if bgr is None:
+                    bgr = _imread_any_path(src_path)
+                if bgr is not None:
+                    last_preview_rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+                yield last_preview_rgb, f"{copied} / {total} 복사 완료"
+        except Exception as e:
+            yield last_preview_rgb, f"{src_path.name} 처리 실패: {e}"
+
+    yield last_preview_rgb, f"완료 — {copied}장 복사  →  {OUT_DIR.resolve()}"
