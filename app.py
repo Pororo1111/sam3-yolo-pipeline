@@ -1,8 +1,7 @@
 import html as _html
 
 import gradio as gr
-from fastrtc import WebRTC
-from pipeline import extractor, labeler, dataset, trainer, inference, zone_monitor, models
+from pipeline import extractor, labeler, dataset, trainer, inference, zone_monitor, models, webcams
 
 
 def _inherit_folder(source_type, current_files, tab1_files):
@@ -20,64 +19,15 @@ def _inherit_video(source_type, current_file, tab1_file):
 
 
 def run_capture(source_type, youtube_url, capture_fps, folder_files, webcam_index, video_file):
-    if source_type == "웹캠":
-        yield None, "브라우저 웹캠 스트림으로 캡처 중입니다."
-        return
     yield from extractor.capture(source_type, youtube_url, int(capture_fps), folder_files, webcam_index, video_file)
 
 
-def start_capture(source_type):
-    if source_type == "웹캠":
-        return extractor.start_browser_webcam_capture()
-    return False, None, "파일/URL 소스 캡처를 시작합니다."
-
-
-def stop_capture(source_type):
-    if source_type == "웹캠":
-        return extractor.stop_browser_webcam_capture()
-    return False, extractor.stop()
-
-
-def start_inference(source_type, model_path):
-    if source_type == "웹캠":
-        active, status = inference.start_browser_webcam_predict(model_path)
-        return active, None, status
-    return False, None, "파일/URL 소스 추론을 시작합니다."
-
-
 def run_inference(model_path, source_type, youtube_url, conf, infer_every, folder_files, webcam_index, video_file):
-    if source_type == "웹캠":
-        yield None, "브라우저 웹캠 스트림으로 추론 중입니다."
-        return
     yield from inference.predict(model_path, source_type, youtube_url, conf, infer_every, folder_files, webcam_index, video_file)
 
 
-def stop_inference(source_type):
-    if source_type == "웹캠":
-        return inference.stop_browser_webcam_predict()
-    inference.stop()
-    return False, "추론 중지"
-
-
-def start_zone_stream(source_type, model_path):
-    if source_type == "웹캠":
-        active, status = zone_monitor.start_browser_webcam_stream(model_path)
-        return active, None, status
-    return False, None, "파일/URL 소스 스트림을 시작합니다."
-
-
 def run_zone_stream(source_type, youtube_url, model_path, conf, infer_every, folder_files, webcam_index, video_file):
-    if source_type == "웹캠":
-        yield None, "브라우저 웹캠 스트림으로 침입 감지 중입니다."
-        return
     yield from zone_monitor.stream(source_type, youtube_url, model_path, conf, infer_every, folder_files, webcam_index, video_file)
-
-
-def stop_zone_stream(source_type):
-    if source_type == "웹캠":
-        return zone_monitor.stop_browser_webcam_stream()
-    zone_monitor.reset()
-    return False, "스트림 중지 / 초기화"
 
 
 def load_classes(label_prompts):
@@ -98,9 +48,9 @@ def refresh_model_dropdown():
 
 
 def refresh_webcam_dropdown():
-    """웹캠 드롭다운 UI를 유지하되 서버 장비를 스캔하지 않는다."""
-    choices = [("브라우저 기본 카메라", "browser")]
-    return gr.update(choices=choices, value="browser")
+    """웹캠 장비 목록을 다시 감지해 드롭다운 choices/value 를 갱신한다."""
+    choices, value = webcams.refresh_webcam_dropdown()
+    return gr.update(choices=choices, value=value)
 
 
 
@@ -154,6 +104,8 @@ _CSS = (
     "#label_gallery .grid-container { grid-template-columns: repeat(4, minmax(0, 1fr)) !important; }"
 )
 
+_webcam_choices, _webcam_value = webcams.refresh_webcam_dropdown()
+
 
 with gr.Blocks(title="YOLO 파이프라인") as demo:
 
@@ -181,18 +133,15 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
                 label="YouTube URL",
                 elem_id="tab1_youtube_url",
             )
-            with gr.Column(elem_id="tab1_webcam_row", elem_classes=["src-hidden"]):
-                with gr.Row():
-                    webcam_index = gr.Dropdown(
-                        choices=[("브라우저 기본 카메라", "browser")],
-                        value="browser",
-                        label="웹캠 장비",
-                        info="브라우저 권한으로 연결되는 카메라입니다. 서버 컴퓨터 장비 목록은 탐색하지 않습니다.",
-                        scale=4,
-                    )
-                    webcam_refresh = gr.Button("웹캠 목록 새로고침", scale=1)
-                webcam_frame = WebRTC(label="웹캠 미리보기")
-                webcam_active = gr.State(False)
+            with gr.Row(elem_id="tab1_webcam_row", elem_classes=["src-hidden"]):
+                webcam_index = gr.Dropdown(
+                    choices=_webcam_choices,
+                    value=_webcam_value,
+                    label="웹캠 장비",
+                    info="감지된 카메라를 선택하세요. 목록이 비어 있으면 새로고침을 눌러 재탐색합니다.",
+                    scale=4,
+                )
+                webcam_refresh = gr.Button("웹캠 목록 새로고침", scale=1)
             with gr.Row(elem_id="tab1_video_row", elem_classes=["src-hidden"]):
                 video_file = gr.File(
                     label="비디오 파일 업로드",
@@ -232,26 +181,14 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
             cap_preview = gr.Image(label="실시간 미리보기", type="numpy", streaming=True)
             cap_status  = gr.Textbox(label="상태", interactive=False)
 
-            cap_start_state = cap_start_btn.click(
-                fn=start_capture,
-                inputs=source_type,
-                outputs=[webcam_active, cap_preview, cap_status],
-            )
-            capture_event = cap_start_state.then(
+            capture_event = cap_start_btn.click(
                 fn=run_capture,
                 inputs=[source_type, youtube_url, capture_fps, folder_files, webcam_index, video_file],
                 outputs=[cap_preview, cap_status],
             )
-            webcam_frame.stream(
-                fn=extractor.capture_browser_webcam_frame,
-                inputs=[webcam_frame, webcam_active, capture_fps],
-                outputs=[webcam_frame, cap_status],
-                show_progress="hidden",
-            )
             cap_stop_btn.click(
-                fn=stop_capture,
-                inputs=source_type,
-                outputs=[webcam_active, cap_status],
+                fn=extractor.stop,
+                outputs=cap_status,
                 cancels=[capture_event],
             )
             webcam_refresh.click(
@@ -561,18 +498,15 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
                 label="YouTube URL",
                 elem_id="tab5_youtube_url",
             )
-            with gr.Column(elem_id="tab5_webcam_row", elem_classes=["src-hidden"]):
-                with gr.Row():
-                    inf_webcam_index = gr.Dropdown(
-                        choices=[("브라우저 기본 카메라", "browser")],
-                        value="browser",
-                        label="웹캠 장비",
-                        info="추론에 사용할 브라우저 카메라입니다. 서버 장비 목록은 탐색하지 않습니다.",
-                        scale=4,
-                    )
-                    inf_webcam_refresh = gr.Button("웹캠 목록 새로고침", scale=1)
-                inf_webcam_frame = WebRTC(label="웹캠 미리보기")
-                inf_webcam_active = gr.State(False)
+            with gr.Row(elem_id="tab5_webcam_row", elem_classes=["src-hidden"]):
+                inf_webcam_index = gr.Dropdown(
+                    choices=_webcam_choices,
+                    value=_webcam_value,
+                    label="웹캠 장비",
+                    info="추론에 사용할 카메라를 선택하세요.",
+                    scale=4,
+                )
+                inf_webcam_refresh = gr.Button("웹캠 목록 새로고침", scale=1)
             with gr.Row(elem_id="tab5_video_row", elem_classes=["src-hidden"]):
                 inf_video_file = gr.File(
                     label="비디오 파일 업로드 (비우면 Tab 1 업로드 자동 사용)",
@@ -624,26 +558,13 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
             inf_preview = gr.Image(label="추론 결과", type="numpy", streaming=True)
             inf_status  = gr.Textbox(label="상태", interactive=False)
 
-            inf_start_state = inf_start_btn.click(
-                fn=start_inference,
-                inputs=[inf_source_type, inf_model_path],
-                outputs=[inf_webcam_active, inf_preview, inf_status],
-            )
-            inf_event = inf_start_state.then(
+            inf_event = inf_start_btn.click(
                 fn=run_inference,
                 inputs=[inf_model_path, inf_source_type, inf_youtube_url, inf_conf, inf_skip, inf_folder_files, inf_webcam_index, inf_video_file],
                 outputs=[inf_preview, inf_status],
             )
-            inf_webcam_frame.stream(
-                fn=inference.predict_browser_webcam_frame,
-                inputs=[inf_webcam_frame, inf_webcam_active, inf_conf, inf_skip],
-                outputs=[inf_webcam_frame, inf_status],
-                show_progress="hidden",
-            )
             inf_stop_btn.click(
-                fn=stop_inference,
-                inputs=inf_source_type,
-                outputs=[inf_webcam_active, inf_status],
+                fn=inference.stop,
                 cancels=[inf_event],
             )
             inf_model_refresh.click(
@@ -694,18 +615,15 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
                 label="YouTube URL",
                 elem_id="tab6_youtube_url",
             )
-            with gr.Column(elem_id="tab6_webcam_row", elem_classes=["src-hidden"]):
-                with gr.Row():
-                    zm_webcam_index = gr.Dropdown(
-                        choices=[("브라우저 기본 카메라", "browser")],
-                        value="browser",
-                        label="웹캠 장비",
-                        info="침입 감시에 사용할 브라우저 카메라입니다. 서버 장비 목록은 탐색하지 않습니다.",
-                        scale=4,
-                    )
-                    zm_webcam_refresh = gr.Button("웹캠 목록 새로고침", scale=1)
-                zm_webcam_frame = WebRTC(label="웹캠 미리보기")
-                zm_webcam_active = gr.State(False)
+            with gr.Row(elem_id="tab6_webcam_row", elem_classes=["src-hidden"]):
+                zm_webcam_index = gr.Dropdown(
+                    choices=_webcam_choices,
+                    value=_webcam_value,
+                    label="웹캠 장비",
+                    info="침입 감시에 사용할 카메라를 선택하세요.",
+                    scale=4,
+                )
+                zm_webcam_refresh = gr.Button("웹캠 목록 새로고침", scale=1)
             with gr.Row(elem_id="tab6_video_row", elem_classes=["src-hidden"]):
                 zm_video_file = gr.File(
                     label="비디오 파일 업로드 (비우면 Tab 1 업로드 자동 사용)",
@@ -778,26 +696,13 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
             zm_zone_status  = gr.Textbox(label="영역 설정 결과", interactive=False)
             zm_llm_log      = gr.Code(label="LLM 응답 (JSON)", language="json", interactive=False)
 
-            zm_start_state = zm_start_btn.click(
-                fn=start_zone_stream,
-                inputs=[zm_source_type, zm_model_path],
-                outputs=[zm_webcam_active, zm_preview, zm_stream_status],
-            )
-            zm_stream_event = zm_start_state.then(
+            zm_stream_event = zm_start_btn.click(
                 fn=run_zone_stream,
                 inputs=[zm_source_type, zm_youtube_url, zm_model_path, zm_conf, zm_skip, zm_folder_files, zm_webcam_index, zm_video_file],
                 outputs=[zm_preview, zm_stream_status],
             )
-            zm_webcam_frame.stream(
-                fn=zone_monitor.stream_browser_webcam_frame,
-                inputs=[zm_webcam_frame, zm_webcam_active, zm_conf, zm_skip],
-                outputs=[zm_webcam_frame, zm_stream_status],
-                show_progress="hidden",
-            )
             zm_stop_btn.click(
-                fn=stop_zone_stream,
-                inputs=zm_source_type,
-                outputs=[zm_webcam_active, zm_stream_status],
+                fn=zone_monitor.reset,
                 cancels=[zm_stream_event],
             )
             zm_set_btn.click(

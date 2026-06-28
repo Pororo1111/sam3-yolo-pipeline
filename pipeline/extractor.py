@@ -6,57 +6,16 @@ import numpy as np
 import yt_dlp
 from pathlib import Path
 
+from pipeline import webcams
 
 OUT_DIR = Path("dataset/raw_frames")
 
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tiff", ".tif"}
 _VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v", ".mpeg", ".mpg"}
+_MAX_PREVIEW_FPS = 30
 
 _stop_event = threading.Event()
 _saved_count = 0  # 현재 캡처 세션에서 저장한 장수 (중지 시 최종 메시지에 사용)
-
-
-_webcam_last_save = 0.0
-_webcam_saved = 0
-
-def start_browser_webcam_capture():
-    """브라우저 webcam 스트림 캡처 세션을 초기화한다."""
-    global _webcam_last_save, _webcam_saved, _saved_count
-    _stop_event.clear()
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-    for f in OUT_DIR.glob("frame_*.jpg"):
-        f.unlink()
-    _webcam_last_save = 0.0
-    _webcam_saved = 0
-    _saved_count = 0
-    return True, None, "브라우저 웹캠 대기 중... 카메라 권한을 허용하면 프레임 저장을 시작합니다."
-
-
-def capture_browser_webcam_frame(frame, active: bool, capture_fps: int):
-    """브라우저에서 전달된 webcam 프레임을 지정 FPS로 저장한다."""
-    global _webcam_last_save, _webcam_saved, _saved_count
-    if not active or frame is None or _stop_event.is_set():
-        return frame, stop() if _stop_event.is_set() else "대기 중"
-
-    now = time.perf_counter()
-    interval = 1.0 / max(1, int(capture_fps or 1))
-    if _webcam_last_save and now - _webcam_last_save < interval:
-        return frame, f"{_webcam_saved}장 저장 중..."
-
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-    rgb = frame.astype(np.uint8)
-    bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-    path = OUT_DIR / f"frame_{_webcam_saved:05d}.jpg"
-    cv2.imwrite(str(path), bgr)
-    _webcam_saved += 1
-    _saved_count = _webcam_saved
-    _webcam_last_save = now
-    return frame, f"{_webcam_saved}장 저장 중... (브라우저 웹캠)"
-
-
-def stop_browser_webcam_capture():
-    _stop_event.set()
-    return False, stop()
 
 
 def stop():
@@ -93,7 +52,7 @@ def capture(source_type: str, youtube_url: str, capture_fps: int, folder_files=N
     Generator — yields (rgb_frame | None, status_str) until done or stopped.
     source_type: "YouTube URL" | "웹캠" | "비디오 파일" | "이미지 폴더"
     folder_files: 이미지 폴더 모드에서 gr.File 업로드 결과(파일 경로 리스트).
-    webcam_index: 더 이상 사용하지 않음(브라우저 웹캠은 gr.Image 스트림으로 전달).
+    webcam_index: 웹캠 모드에서 사용할 장비 인덱스.
     video_file: 비디오 파일 모드에서 gr.File 업로드 결과.
     """
     global _saved_count
@@ -130,8 +89,7 @@ def capture(source_type: str, youtube_url: str, capture_fps: int, folder_files=N
             return
         cap = cv2.VideoCapture(str(video_path))
     else:
-        yield None, "웹캠은 브라우저 기반 입력을 사용합니다. 화면의 웹캠 미리보기 권한을 허용한 뒤 캡처를 시작하세요."
-        return
+        cap = cv2.VideoCapture(webcams.coerce_webcam_index(webcam_index))
 
     if not cap.isOpened():
         yield None, "소스를 열 수 없습니다."
@@ -145,10 +103,9 @@ def capture(source_type: str, youtube_url: str, capture_fps: int, folder_files=N
 
     frame_idx = 0
     saved = 0
-    # 저장 FPS와 미리보기 FPS를 분리한다. 기존에는 capture_fps=5이면
-    # 미리보기도 5fps로만 갱신되어 YouTube/비디오 소스가 끊겨 보였다.
-    # 저장은 capture_fps를 따르되, 화면 미리보기는 최대 15fps로 별도 갱신한다.
-    preview_fps = 15
+    # 저장 FPS와 미리보기 FPS를 분리한다. 저장은 capture_fps를 따르되,
+    # 화면 미리보기는 소스 FPS에 맞춰 최대 30fps까지 전송한다.
+    preview_fps = max(1, min(_MAX_PREVIEW_FPS, round(src_fps)))
     display_interval = 1.0 / preview_fps
     last_yield = 0.0
     last_preview_rgb = None

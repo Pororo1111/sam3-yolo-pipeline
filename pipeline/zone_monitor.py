@@ -4,6 +4,7 @@ import threading
 import time
 from pathlib import Path
 
+from pipeline import webcams
 
 import cv2
 import numpy as np
@@ -88,66 +89,6 @@ _zone_lock = threading.Lock()
 _last_frame: np.ndarray | None = None
 _last_frame_lock = threading.Lock()
 
-_browser_model = None
-_browser_names = {}
-_browser_frame_idx = 0
-_browser_last_boxes = None
-
-
-def start_browser_webcam_stream(model_path: str):
-    """브라우저 webcam 침입 감지 세션을 시작하고 모델을 1회 로딩한다."""
-    global _browser_model, _browser_names, _browser_frame_idx, _browser_last_boxes
-    _stop_event.clear()
-    if not (model_path or "").strip():
-        model_path = _find_best_pt()
-    if model_path is None or not Path(model_path).exists():
-        return False, f"모델 파일을 찾을 수 없습니다: {model_path}"
-    try:
-        from ultralytics import YOLO
-        _browser_model = YOLO(model_path)
-    except Exception as e:
-        return False, f"모델 로딩 실패: {e}"
-    _browser_names = _browser_model.names or {}
-    _browser_frame_idx = 0
-    _browser_last_boxes = None
-    return True, f"브라우저 웹캠 침입 감지 시작 — {model_path}"
-
-
-def stream_browser_webcam_frame(frame, active: bool, conf: float, infer_every: int):
-    """브라우저에서 전달된 webcam 프레임 1장에 YOLO/zone 오버레이를 적용한다."""
-    global _last_frame, _browser_frame_idx, _browser_last_boxes
-    if not active or frame is None:
-        return frame, "대기 중"
-    if _browser_model is None:
-        return frame, "모델이 아직 로딩되지 않았습니다."
-    if _stop_event.is_set():
-        return frame, "중지됨"
-
-    frame_bgr = cv2.cvtColor(frame.astype(np.uint8), cv2.COLOR_RGB2BGR)
-    with _last_frame_lock:
-        _last_frame = frame_bgr.copy()
-
-    infer_every = max(1, int(infer_every or 1))
-    if _browser_frame_idx % infer_every == 0:
-        results = _browser_model(frame_bgr, conf=conf, verbose=False)
-        _browser_last_boxes = results[0].boxes if results[0].boxes is not None else None
-
-    annotated = _overlay_boxes(frame_bgr, _browser_last_boxes or [], _browser_names)
-    annotated, total_intruders, n_zones = _render_zones(annotated, _browser_last_boxes)
-    h, w = annotated.shape[:2]
-    if w > 854:
-        scale = 854 / w
-        annotated = cv2.resize(annotated, (854, int(h * scale)))
-    rgb = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
-    _browser_frame_idx += 1
-    return rgb, f"브라우저 웹캠 프레임 {_browser_frame_idx} | 영역: {n_zones}개 | 침입 객체: {total_intruders}개"
-
-
-def stop_browser_webcam_stream():
-    _stop_event.set()
-    return False, "브라우저 웹캠 침입 감지 중지"
-
-
 def stop():
     _stop_event.set()
 
@@ -175,7 +116,7 @@ def _uploaded_video_path(file) -> "tuple[Path | None, str | None]":
 
 def _resolve_source(source_type: str, youtube_url: str, webcam_index=None, video_file=None):
     if source_type == "웹캠":
-        return None, "웹캠 침입 감지는 UI의 브라우저 웹캠 스트림 핸들러에서 처리합니다. 서버 카메라에는 접근하지 않습니다."
+        return webcams.coerce_webcam_index(webcam_index), None
     if source_type == "비디오 파일":
         video_path, err = _uploaded_video_path(video_file)
         return (str(video_path) if video_path else None), err

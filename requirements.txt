@@ -16,7 +16,6 @@ fsspec==2026.4.0
 ftfy==6.3.1
 gradio==6.16.0
 gradio_client==2.5.0
-fastrtc
 groovy==0.1.2
 h11==0.16.0
 hf-gradio==0.4.1
