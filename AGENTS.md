@@ -62,12 +62,12 @@ yolo-webui/
 ├── install_cpu.sh          ← CPU PyTorch 설치용 스크립트
 ├── pipeline/
 │   ├── __init__.py
-│   ├── extractor.py        ← Tab 1: 프레임 추출         (완료)
-│   ├── labeler.py          ← Tab 2: SAM3 오토라벨링     (완료)
-│   ├── dataset.py          ← Tab 3: 데이터셋 검토/구성  (완료)
-│   ├── trainer.py          ← Tab 4: YOLO 학습           (완료)
-│   ├── inference.py        ← Tab 5: 추론                (완료)
-│   └── zone_monitor.py     ← Tab 6: 침입 감지           (완료)
+│   ├── extractor.py        ← Tab 1: 프레임 추출
+│   ├── labeler.py          ← Tab 2: SAM3 오토라벨링
+│   ├── dataset.py          ← Tab 3: 데이터셋 검토/구성
+│   ├── trainer.py          ← Tab 4: YOLO 학습
+│   ├── inference.py        ← Tab 5: 추론
+│   └── zone_monitor.py     ← Tab 6: 침입 감지
 ├── dataset/
 │   ├── raw_frames/         ← 추출된 원본 프레임
 │   ├── images/train|val/   ← 분할된 학습/검증 이미지
@@ -99,24 +99,30 @@ yolo-webui/
 
 ## 단계별 구현 상세
 
-### Tab 1 — 프레임 추출 (완료)
+### Tab 1 — 프레임 추출
 **파일**: `pipeline/extractor.py`
 
-- 소스: YouTube URL (`yt-dlp` 스트림 URL 추출) / 웹캠 / 비디오 파일 / **이미지 폴더** (로컬 폴더 임포트)
+- 소스: YouTube URL / 웹캠 / 비디오 파일 / **이미지 폴더**
 - YouTube URL, 비디오 파일, 이미지 폴더는 `samples/` 아래 샘플 입력을 카드형 버튼으로 불러올 수 있다.
-- 고정 간격 캡처: `frame_interval = src_fps / capture_fps`
-- **무제한 추출** — 영상 종료 또는 중지 버튼 전까지 계속 저장 (이전 500장 상한 제거)
-- 시작 시 `dataset/raw_frames/`의 기존 `frame_*.jpg` 삭제 후 새로 저장
-- 저장 경로: `dataset/raw_frames/frame_XXXXX.jpg`
-- 이미지 폴더 모드: `np.fromfile`+`cv2.imdecode`로 **유니코드(한글) 경로 안전 처리**, jpg/jpeg/png/bmp/webp/tiff 지원, jpg로 통일 저장
-- 폴더 선택은 **Gradio 내장 파일 업로드**(`gr.File(file_count="directory", type="filepath")`) 사용 — 브라우저 기반이라 macOS·Windows·Linux 모두 동작 (이전 tkinter `filedialog` 방식은 macOS 미대응으로 제거)
-- 업로드 파일 리스트는 `_filter_image_paths()`로 지원 확장자만 필터링 후 파일명 기준 정렬. gr.File 경로(str) 및 `.name` 속성 객체 모두 방어적으로 처리
-- 소스 라디오 전환 시 입력칸 표시는 **클라이언트 JS 토글**(`elem_id` + `.src-hidden` CSS 클래스)로 처리 — Gradio 6 큐/동시성 race 회피 (서버 왕복 없음)
-- Gradio 중지: `_stop_event`(threading.Event) + `cancels=[capture_event]` 동시 사용. **`cancels`가 제너레이터를 강제 종료**해 내부 마지막 yield(완료 메시지)가 실행되지 못하므로, 중지 버튼은 `extractor.stop()`의 **반환값으로 상태창(`cap_status`)을 직접 갱신**한다(`outputs=cap_status`). `stop()`은 모듈 전역 `_saved_count`로 저장 장수를 읽어 "중지됨 — N장 저장 완료" 반환
-- 실시간 미리보기 `cap_preview`는 `gr.Image(streaming=True)` **+ 캡처 루프 yield 15fps 스로틀**(`display_interval=1/15`) 둘 다 필요. 다운로드 영상은 `cap.read()`가 즉시 반환돼 루프가 폭주 → 스로틀 없으면 제너레이터 출력이 버퍼링되어 **중지(취소) 시점에만 마지막 프레임이 flush**됨(=실시간 갱신 안 됨). 추론·침입 탭이 잘 되는 이유도 동일 스로틀 때문 (라이브 스트림은 `cap.read()`가 실시간 대기해 자연 페이싱)
-- 프리뷰: 15fps 스로틀로만 yield → Gradio WebSocket 부담 최소화
+  - `samples/sample_url.txt`
+  - `samples/sample.mp4`
+  - `samples/sample_image/`
+- 소스별 입력칸과 샘플 버튼 표시는 **클라이언트 JS 토글**(`elem_id` + `.src-hidden` CSS 클래스)로 처리한다. Gradio 큐 왕복 없이 즉시 전환하기 위한 구조다.
+- 미리보기는 소스별로 분리한다.
+  - YouTube URL: `gr.HTML` iframe embed로 브라우저 네이티브 미리보기 표시
+  - 비디오 파일: `gr.HTML` 내부 `<video>` 태그로 브라우저 네이티브 미리보기 표시
+  - 웹캠: `gr.Video(sources=["webcam"], streaming=True)`로 클라이언트 측 미리보기 표시
+  - 이미지 폴더: `gr.Image(streaming=True)`로 임포트 진행 프레임 표시
+- 캡처 저장은 `extractor.capture(..., emit_preview=...)`에서 처리한다. `app.run_capture()`는 이미지 폴더일 때만 `emit_preview=True`로 프레임을 Gradio에 보내고, YouTube/웹캠/비디오 파일은 브라우저 네이티브 미리보기를 쓰면서 상태만 갱신한다.
+- YouTube URL은 `yt-dlp`로 스트림 URL을 추출하며 `_STREAM_CACHE_TTL = 600`초 캐시를 둔다.
+- YouTube/웹캠/비디오 파일 저장은 `cv2.VideoCapture` 기반으로 읽고, `capture_fps`에 맞춰 `dataset/raw_frames/frame_XXXXX.jpg`에 저장한다.
+- 시작 시 `dataset/raw_frames/`의 기존 `frame_*.jpg`를 삭제한 뒤 새로 저장한다.
+- 이미지 폴더 모드는 `gr.File(file_count="directory", type="filepath")` 업로드를 사용한다. `_filter_image_paths()`가 지원 확장자만 추려 파일명 기준으로 정렬한다.
+- 이미지 폴더 임포트는 jpg/jpeg는 `shutil.copyfile()`로 재인코딩 없이 복사하고, 그 외 포맷은 유니코드 경로 안전 처리를 위해 `np.fromfile` + `cv2.imdecode` 후 jpg로 저장한다.
+- 이미지 폴더 미리보기/상태 업데이트는 매 파일마다 보내지 않고 첫 장/마지막/0.5초 간격 중심으로 제한해 대량 복사 시 UI 병목을 줄인다.
+- 중지 버튼은 `cancels=[capture_event]`로 캡처 제너레이터를 취소하고 `stop_capture_and_reset()`에서 YouTube/비디오/웹캠/이미지 미리보기를 모두 초기화한다. 상태창은 `extractor.stop()` 반환값으로 직접 갱신한다.
 
-### Tab 2 — SAM3 오토라벨링 (완료)
+### Tab 2 — SAM3 오토라벨링
 **파일**: `pipeline/labeler.py`
 
 - 모델: `sam3.pt` — `SAM3SemanticPredictor` (텍스트 프롬프트 전용)
@@ -147,7 +153,7 @@ masks = results[0].masks.data.cpu().numpy().astype(np.uint8)
 cls_ids = results[0].boxes.cls.cpu().numpy().astype(int)
 ```
 
-### Tab 3 — 데이터셋 검토 & 구성 (완료)
+### Tab 3 — 데이터셋 검토 & 구성
 **파일**: `pipeline/dataset.py`
 
 - **클래스 편집기 (리스트형)**: 탭 진입/「클래스 불러오기」 시 `scan_classes()`로 라벨을 스캔해 **클래스별 행(ID · 프레임 수 + 즉시 수정 가능한 이름 입력칸)** 을 `@gr.render`로 동적 생성 → 가독성·편의성 향상. 이름 칸은 `gr.Textbox(interactive=True)` (render 동적 생성 시 Gradio 6.x가 입력 추론을 못 해 비활성화되는 것 방지)
@@ -166,7 +172,7 @@ cls_ids = results[0].boxes.cls.cpu().numpy().astype(int)
 - 분할 전 `images/train|val`, `labels/train|val`을 `shutil.rmtree`로 정리 → 재실행 시 데이터 누적 및 같은 프레임이 train/val 양쪽에 섞이는 누수 방지
 - `dataset/dataset.yaml` 자동 생성 (클래스명은 최종 클래스 이름에서 자동 설정)
 
-### Tab 4 — YOLO 학습 (완료)
+### Tab 4 — YOLO 학습
 **파일**: `pipeline/trainer.py`
 
 - 모델: `yolo26n.pt` (기본 베이스) — **베이스 모델 드롭다운으로 이어학습(파인튜닝) 지원**: 비우면(값 `""`) 사전학습 `yolo26n.pt`로 처음부터, 학습된 모델(`best.pt`)을 고르면 그 가중치 위에 `YOLO(base_path)`로 로딩 후 새 학습. 드롭다운 첫 항목이 "처음부터"이고 이후는 `models.list_trained_models()` 재사용(추론 탭과 동일). 결과는 항상 `name` 입력칸이 정한 새 폴더에 저장돼 베이스는 보존
@@ -190,10 +196,10 @@ cls_ids = results[0].boxes.cls.cpu().numpy().astype(int)
 
 학습 후 `runs/detect/train/results.csv` 에서 loss 곡선 확인 권장.
 
-### Tab 5 — 추론 (완료)
+### Tab 5 — 추론
 **파일**: `pipeline/inference.py`
 
-- 소스: Tab 1과 동일 (YouTube URL / 웹캠 / 이미지 폴더), 영상은 `cv2.VideoCapture` 직접 사용
+- 소스: Tab 1과 동일 (YouTube URL / 웹캠 / 비디오 파일 / 이미지 폴더), 영상은 `cv2.VideoCapture` 직접 사용
 - 이미지 폴더 모드(`_predict_folder`): 업로드된 이미지를 순회하며 장당 추론·표시, 중지 전까지 반복(0.4초 간격)
 - 폴더 입력은 `gr.File(file_count="directory")` 업로드. 업로드가 비어 있으면 **Tab 1 업로드 파일을 자동 상속**(`_inherit_folder`)
 - `infer_every`: N프레임마다 1회 추론, 나머지는 마지막 bbox 재사용 (기본값 3)
@@ -204,10 +210,10 @@ cls_ids = results[0].boxes.cls.cpu().numpy().astype(int)
 - 드롭다운이 비어(`value=None`) `predict`에 전달돼도 `(model_path or "").strip()`으로 방어 → `_find_best_pt()` 폴백, 그래도 없으면 안내 메시지
 - `gr.Image(streaming=True)` 사용
 
-### Tab 6 — 침입 감지 (완료)
+### Tab 6 — 침입 감지
 **파일**: `pipeline/zone_monitor.py`
 
-- 소스: Tab 1/5와 동일 (YouTube URL / 웹캠 / 이미지 폴더)
+- 소스: Tab 1/5와 동일 (YouTube URL / 웹캠 / 비디오 파일 / 이미지 폴더)
 - 이미지 폴더 모드(`_stream_folder`): 업로드 이미지 순회하며 `_last_frame` 갱신(→ 영역 설정 가능) + 침입 판별, 중지 전까지 반복
 - 폴더 입력은 `gr.File(file_count="directory")` 업로드. 업로드가 비어 있으면 Tab 1 업로드 파일 자동 상속
 - zone 오버레이 로직은 `_render_zones()` 헬퍼로 추출 — 비디오/폴더 루프 공유
