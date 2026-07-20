@@ -1,5 +1,4 @@
 import html as _html
-import urllib.parse as _urlparse
 from pathlib import Path
 
 import gradio as gr
@@ -59,118 +58,24 @@ def load_sample_image_folder():
 
 
 def run_capture(source_type, youtube_url, capture_fps, folder_files, webcam_index, video_file):
-    emit_preview = source_type == "이미지 폴더"
-    for frame, status in extractor.capture(
+    yield from extractor.capture(
         source_type,
         youtube_url,
         int(capture_fps),
         folder_files,
         webcam_index,
         video_file,
-        emit_preview=emit_preview,
-    ):
-        yield (frame if emit_preview else gr.update(), status)
-
-
-def _youtube_embed_html(url: str) -> tuple[str | None, str | None]:
-    """일반 YouTube URL에서 iframe embed HTML을 만든다."""
-    raw = (url or "").strip()
-    if not raw:
-        return None, "YouTube URL을 입력하세요."
-
-    parsed = _urlparse.urlparse(raw)
-    host = parsed.netloc.lower().removeprefix("www.")
-    video_id = ""
-
-    if host == "youtu.be":
-        video_id = parsed.path.strip("/").split("/")[0]
-    elif "youtube.com" in host:
-        if parsed.path == "/watch":
-            video_id = _urlparse.parse_qs(parsed.query).get("v", [""])[0]
-        elif parsed.path.startswith("/shorts/") or parsed.path.startswith("/embed/") or parsed.path.startswith("/live/"):
-            parts = [p for p in parsed.path.split("/") if p]
-            if len(parts) >= 2:
-                video_id = parts[1]
-
-    if not video_id:
-        return None, "지원하지 않는 YouTube URL 형식입니다."
-
-    safe_id = _html.escape(video_id, quote=True)
-    src = f"https://www.youtube.com/embed/{safe_id}?autoplay=1&mute=1&playsinline=1"
-    return (
-        '<div class="youtube-preview">'
-        f'<iframe src="{src}" title="YouTube 미리보기" '
-        'allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" '
-        'allowfullscreen></iframe>'
-        "</div>"
-    ), None
-
-
-def _local_video_html(path: str) -> str:
-    """로컬 비디오를 Gradio 변환 없이 브라우저 video 태그로 표시한다."""
-    encoded = _urlparse.quote(str(Path(path).resolve()), safe="")
-    src = f"/gradio_api/file={encoded}"
-    return (
-        '<div class="local-video-preview">'
-        f'<video src="{src}" controls autoplay muted playsinline></video>'
-        "</div>"
     )
 
 
 def prepare_capture_preview(source_type, youtube_url, video_file):
-    """캡처 전에 브라우저 네이티브 비디오 미리보기 영역을 소스별로 전환한다."""
-    image_visible = source_type == "이미지 폴더"
-    if source_type == "YouTube URL":
-        html, err = _youtube_embed_html(youtube_url)
-        if err:
-            return (
-                gr.update(value="", visible=False),
-                gr.update(value=None, visible=False),
-                gr.update(visible=False),
-                gr.update(visible=image_visible),
-                err,
-            )
-        return (
-            gr.update(value=html, visible=True),
-            gr.update(value=None, visible=False),
-            gr.update(visible=False),
-            gr.update(visible=False),
-            "YouTube 미리보기 준비 완료. 캡처를 시작합니다.",
-        )
-
-    if source_type == "비디오 파일":
-        src, err = extractor.video_preview_source(source_type, youtube_url, video_file)
-        if err:
-            return (
-                gr.update(value="", visible=False),
-                gr.update(value="", visible=False),
-                gr.update(visible=False),
-                gr.update(visible=image_visible),
-                err,
-            )
-        return (
-            gr.update(value="", visible=False),
-            gr.update(value=_local_video_html(src), visible=True),
-            gr.update(visible=False),
-            gr.update(visible=False),
-            "비디오 미리보기 준비 완료. 캡처를 시작합니다.",
-        )
-
-    if source_type == "웹캠":
-        return (
-            gr.update(value="", visible=False),
-            gr.update(value="", visible=False),
-            gr.update(visible=True),
-            gr.update(visible=False),
-            "웹캠 미리보기를 준비했습니다. 브라우저 권한을 허용하세요.",
-        )
-
+    """모든 영상 소스가 공유하는 Gradio 이미지 스트림을 초기화한다."""
     return (
         gr.update(value="", visible=False),
         gr.update(value="", visible=False),
         gr.update(visible=False),
-        gr.update(visible=True),
-        "이미지 폴더 캡처를 시작합니다.",
+        gr.update(value=None, visible=True),
+        "실시간 미리보기를 준비합니다.",
     )
 
 
@@ -412,6 +317,9 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
                 fn=run_capture,
                 inputs=[source_type, youtube_url, capture_fps, folder_files, webcam_index, video_file],
                 outputs=[cap_preview, cap_status],
+                show_progress="hidden",
+                concurrency_limit=1,
+                concurrency_id="frame_capture",
             )
             cap_stop_btn.click(
                 fn=stop_capture_and_reset,

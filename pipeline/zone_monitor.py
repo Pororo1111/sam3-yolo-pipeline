@@ -4,34 +4,13 @@ import threading
 import time
 from pathlib import Path
 
-from pipeline import webcams
+from pipeline import media, models, vision
 
 import cv2
 import numpy as np
 import requests
 
 OLLAMA_URL = "http://localhost:11434/api/chat"
-
-_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tiff", ".tif"}
-_VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v", ".mpeg", ".mpg"}
-
-
-def _find_best_pt() -> str | None:
-    candidates = sorted(Path("runs/detect").glob("*/weights/best.pt"))
-    return str(candidates[-1]) if candidates else None
-
-
-def _filter_image_paths(files) -> "list[Path]":
-    """gr.File 업로드 결과에서 지원 형식의 이미지 경로만 정렬해 반환."""
-    if not files:
-        return []
-    paths = []
-    for f in files:
-        p = Path(getattr(f, "name", f))
-        if p.is_file() and p.suffix.lower() in _IMAGE_EXTS:
-            paths.append(p)
-    return sorted(paths, key=lambda p: p.name)
-
 
 def _count_objects_in_zone(boxes, polygon: np.ndarray) -> int:
     count = 0
@@ -43,18 +22,12 @@ def _count_objects_in_zone(boxes, polygon: np.ndarray) -> int:
     return count
 
 
-def _overlay_boxes(frame_bgr: np.ndarray, boxes, names: dict) -> np.ndarray:
-    img = frame_bgr.copy()
-    for box in boxes:
-        x1, y1, x2, y2 = map(int, box.xyxy[0])
-        cls_id = int(box.cls[0])
-        conf = float(box.conf[0])
-        label = f"{names.get(cls_id, cls_id)} {conf:.2f}"
-        color = ((cls_id * 67 + 100) % 256, (cls_id * 113 + 50) % 256, (cls_id * 41 + 200) % 256)
-        cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
-        cv2.putText(img, label, (x1, max(y1 - 6, 0)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
-    return img
+def _zone_box_color(class_id: int) -> tuple[int, int, int]:
+    return (
+        (class_id * 67 + 100) % 256,
+        (class_id * 113 + 50) % 256,
+        (class_id * 41 + 200) % 256,
+    )
 
 def _render_zones(annotated: np.ndarray, last_boxes):
     """현재 zone들을 annotated 위에 그리고 (annotated, 침입수, zone수) 반환."""
@@ -63,7 +36,8 @@ def _render_zones(annotated: np.ndarray, last_boxes):
 
     total_intruders = 0
     for zone in current_zones:
-        count = _count_objects_in_zone(last_boxes or [], zone["polygon"])
+        boxes = last_boxes if last_boxes is not None else []
+        count = _count_objects_in_zone(boxes, zone["polygon"])
         total_intruders += count
         color = (0, 0, 220) if count > 0 else (0, 220, 80)  # BGR: 빨강 or 초록
         thickness = 3 if count > 0 else 2
@@ -102,35 +76,6 @@ def reset():
         _last_frame = None
 
 
-def _uploaded_video_path(file) -> "tuple[Path | None, str | None]":
-    """gr.File 업로드 결과를 비디오 파일 Path로 정규화한다."""
-    if not file:
-        return None, "비디오 파일을 업로드하세요."
-    path = Path(getattr(file, "name", file))
-    if not path.is_file():
-        return None, f"비디오 파일을 찾을 수 없습니다: {path}"
-    if path.suffix.lower() not in _VIDEO_EXTS:
-        return None, f"지원하지 않는 비디오 형식입니다 (지원 형식: {', '.join(sorted(_VIDEO_EXTS))})"
-    return path, None
-
-
-def _resolve_source(source_type: str, youtube_url: str, webcam_index=None, video_file=None):
-    if source_type == "웹캠":
-        return webcams.coerce_webcam_index(webcam_index), None
-    if source_type == "비디오 파일":
-        video_path, err = _uploaded_video_path(video_file)
-        return (str(video_path) if video_path else None), err
-    if not youtube_url.strip():
-        return None, "YouTube URL을 입력하세요."
-    try:
-        import yt_dlp
-        with yt_dlp.YoutubeDL({"quiet": True, "format": "best[ext=mp4]/best"}) as ydl:
-            info = ydl.extract_info(youtube_url, download=False)
-            return info["url"], None
-    except Exception as e:
-        return None, f"YouTube URL 처리 실패: {e}"
-
-
 def stream(source_type: str, youtube_url: str, model_path: str, conf: float,
            infer_every: int, folder_files=None, webcam_index=None, video_file=None):
     global _last_frame
@@ -138,7 +83,7 @@ def stream(source_type: str, youtube_url: str, model_path: str, conf: float,
 
     # YOLO 모델 로딩
     if not (model_path or "").strip():
-        model_path = _find_best_pt()
+        model_path = models.latest_trained_model()
     if model_path is None or not Path(model_path).exists():
         yield None, f"모델 파일을 찾을 수 없습니다: {model_path}"
         return
@@ -152,18 +97,19 @@ def stream(source_type: str, youtube_url: str, model_path: str, conf: float,
 
     names = model.names or {}
 
-    if source_type == "이미지 폴더":
+    if source_type == media.SOURCE_IMAGES:
         yield from _stream_folder(model, names, folder_files, conf)
         return
 
-    cap_source, err = _resolve_source(source_type, youtube_url, webcam_index, video_file)
-    if err:
-        yield None, err
-        return
-
-    cap = cv2.VideoCapture(cap_source)
-    if not cap.isOpened():
-        yield None, "영상 소스를 열 수 없습니다."
+    try:
+        source = media.resolve_video_source(
+            source_type,
+            youtube_url=youtube_url,
+            webcam_index=webcam_index,
+            video_file=video_file,
+        )
+    except media.MediaSourceError as exc:
+        yield None, str(exc)
         return
 
     yield None, "스트림 시작..."
@@ -174,47 +120,52 @@ def stream(source_type: str, youtube_url: str, model_path: str, conf: float,
     last_boxes = None
 
     try:
-        while not _stop_event.is_set():
-            ret, frame_bgr = cap.read()
-            if not ret:
-                break
+        with media.open_video_capture(source) as capture:
+            while not _stop_event.is_set():
+                ret, frame_bgr = capture.read()
+                if not ret:
+                    break
 
-            with _last_frame_lock:
-                _last_frame = frame_bgr.copy()
+                with _last_frame_lock:
+                    _last_frame = frame_bgr.copy()
 
-            if frame_idx % infer_every == 0:
-                results = model(frame_bgr, conf=conf, verbose=False)
-                last_boxes = results[0].boxes if results[0].boxes is not None else None
+                if frame_idx % max(1, int(infer_every)) == 0:
+                    results = model(frame_bgr, conf=conf, verbose=False)
+                    last_boxes = (
+                        results[0].boxes if results[0].boxes is not None else None
+                    )
 
-            now = time.perf_counter()
-            if now - last_yield < display_interval:
+                now = time.perf_counter()
+                if now - last_yield < display_interval:
+                    frame_idx += 1
+                    continue
+                last_yield = now
+
+                annotated = vision.draw_boxes(
+                    frame_bgr,
+                    last_boxes,
+                    names,
+                    color_provider=_zone_box_color,
+                    font_scale=0.55,
+                )
+                annotated, total_intruders, n_zones = _render_zones(
+                    annotated,
+                    last_boxes,
+                )
+
                 frame_idx += 1
-                continue
-            last_yield = now
+                status = (
+                    f"프레임 {frame_idx} | 영역: {n_zones}개 | "
+                    f"침입 객체: {total_intruders}개"
+                )
+                yield vision.to_rgb(annotated), status
 
-            # bbox 오버레이
-            annotated = _overlay_boxes(frame_bgr, last_boxes or [], names)
-
-            # zone 오버레이
-            annotated, total_intruders, n_zones = _render_zones(annotated, last_boxes)
-
-            h, w = annotated.shape[:2]
-            if w > 854:
-                scale = 854 / w
-                annotated = cv2.resize(annotated, (854, int(h * scale)))
-
-            rgb = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
-            frame_idx += 1
-            status = (
-                f"프레임 {frame_idx} | 영역: {n_zones}개 | "
-                f"침입 객체: {total_intruders}개"
-            )
-            yield rgb, status
-
-    except Exception as e:
-        yield None, f"스트림 오류: {e}"
-    finally:
-        cap.release()
+    except media.MediaSourceError as exc:
+        yield None, str(exc)
+    except GeneratorExit:
+        raise
+    except Exception as exc:
+        yield None, f"스트림 오류: {exc}"
 
     yield None, "스트림 종료"
 
@@ -223,7 +174,7 @@ def _stream_folder(model, names: dict, folder_files, conf: float):
     """업로드된 이미지들을 순회하며 zone 감시 (중지 전까지 반복)."""
     global _last_frame
 
-    images = _filter_image_paths(folder_files)
+    images = media.filter_image_paths(folder_files)
     if not images:
         yield None, "업로드된 이미지가 없습니다. 이미지 폴더를 업로드하세요."
         return
@@ -235,8 +186,7 @@ def _stream_folder(model, names: dict, folder_files, conf: float):
         for p in images:
             if _stop_event.is_set():
                 break
-            buf = np.fromfile(str(p), dtype=np.uint8)
-            frame_bgr = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+            frame_bgr = media.read_image(p)
             if frame_bgr is None:
                 continue
 
@@ -246,21 +196,21 @@ def _stream_folder(model, names: dict, folder_files, conf: float):
             results = model(frame_bgr, conf=conf, verbose=False)
             last_boxes = results[0].boxes if results[0].boxes is not None else None
 
-            annotated = _overlay_boxes(frame_bgr, last_boxes or [], names)
+            annotated = vision.draw_boxes(
+                frame_bgr,
+                last_boxes,
+                names,
+                color_provider=_zone_box_color,
+                font_scale=0.55,
+            )
             annotated, total_intruders, n_zones = _render_zones(annotated, last_boxes)
 
-            h, w = annotated.shape[:2]
-            if w > 854:
-                scale = 854 / w
-                annotated = cv2.resize(annotated, (854, int(h * scale)))
-
-            rgb = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
             shown += 1
-            yield rgb, (
+            yield vision.to_rgb(annotated), (
                 f"{p.name} | 영역: {n_zones}개 | "
                 f"침입 객체: {total_intruders}개 ({shown})"
             )
-            time.sleep(0.4)
+            _stop_event.wait(0.4)
 
     yield None, "스트림 종료"
 

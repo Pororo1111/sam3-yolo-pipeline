@@ -59,8 +59,9 @@ def _candidate_indices(max_devices: int) -> list[int]:
     return list(range(max_devices))
 
 
-def _open_camera(index: int):
+def open_webcam(index) -> cv2.VideoCapture:
     """플랫폼별 권장 백엔드로 카메라를 연다."""
+    index = coerce_webcam_index(index)
     system = platform.system()
     if system == "Windows":
         return cv2.VideoCapture(index, cv2.CAP_DSHOW)
@@ -74,7 +75,7 @@ def list_webcams(max_devices: int = 10) -> list[tuple[str, str]]:
     choices: list[tuple[str, str]] = []
     for index in _candidate_indices(max_devices):
         with _suppress_native_stderr():
-            cap = _open_camera(index)
+            cap = open_webcam(index)
             try:
                 if not cap.isOpened():
                     continue

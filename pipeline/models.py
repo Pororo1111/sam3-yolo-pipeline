@@ -80,3 +80,10 @@ def list_trained_models() -> list[tuple[str, str]]:
 
     items.sort(key=lambda x: x[0], reverse=True)
     return [(label, path) for _, label, path in items]
+
+
+def latest_trained_model() -> str | None:
+    """가장 최근에 생성된 학습 모델 경로를 반환한다."""
+
+    choices = list_trained_models()
+    return choices[0][1] if choices else None

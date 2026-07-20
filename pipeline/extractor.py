@@ -1,81 +1,54 @@
-import threading
+"""Tab 1 프레임 추출 서비스."""
+
+from __future__ import annotations
+
 import shutil
+import threading
 import time
-import cv2
-import numpy as np
-import yt_dlp
 from pathlib import Path
 
-from pipeline import webcams
+import cv2
+
+from pipeline import media, vision
+
 
 OUT_DIR = Path("dataset/raw_frames")
 
-_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tiff", ".tif"}
-_VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v", ".mpeg", ".mpg"}
-_MAX_PREVIEW_FPS = 30
-_STREAM_CACHE_TTL = 600
-
-_stop_event = threading.Event()
-_saved_count = 0  # 현재 캡처 세션에서 저장한 장수 (중지 시 최종 메시지에 사용)
-_stream_url_cache: dict[str, tuple[float, str]] = {}
+_MAX_PREVIEW_FPS = 10
+_FOLDER_PREVIEW_INTERVAL = 0.2
 
 
-def stop():
-    """중지 요청 + 최종 상태 문자열 반환.
+class _CaptureController:
+    """현재 캡처 작업의 취소 신호와 진행량을 동기화한다."""
 
-    중지 버튼은 `cancels`로 캡처 제너레이터를 강제 종료하므로 제너레이터
-    내부의 마지막 yield(완료 메시지)가 실행되지 못한다. 따라서 중지 버튼이
-    직접 상태창을 갱신하도록 여기서 최종 메시지를 반환한다.
-    """
-    _stop_event.set()
-    return f"중지됨 — {_saved_count}장 저장 완료  →  {OUT_DIR.resolve()}"
+    def __init__(self):
+        self.stop_event = threading.Event()
+        self._lock = threading.Lock()
+        self._saved_count = 0
 
+    def begin(self) -> None:
+        self.stop_event.clear()
+        with self._lock:
+            self._saved_count = 0
 
-def _get_youtube_stream_url(url: str) -> str:
-    cached = _stream_url_cache.get(url)
-    now = time.time()
-    if cached and now - cached[0] < _STREAM_CACHE_TTL:
-        return cached[1]
+    def saved(self, count: int) -> None:
+        with self._lock:
+            self._saved_count = count
 
-    ydl_opts = {
-        "format": "best[ext=mp4]/bestvideo[ext=mp4]/best",
-        "quiet": True,
-        "no_warnings": True,
-    }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=False)
-        # live stream or regular video both return 'url'
-        formats = info.get("formats") or []
-        if formats:
-            # pick best mp4
-            mp4 = [f for f in formats if f.get("ext") == "mp4" and f.get("url")]
-            if mp4:
-                stream_url = mp4[-1]["url"]
-                _stream_url_cache[url] = (now, stream_url)
-                return stream_url
-        stream_url = info["url"]
-        _stream_url_cache[url] = (now, stream_url)
-        return stream_url
+    def stop(self) -> int:
+        self.stop_event.set()
+        with self._lock:
+            return self._saved_count
 
 
-def video_preview_source(source_type: str, youtube_url: str, video_file=None):
-    """Tab 1의 브라우저 비디오 미리보기에 사용할 src를 반환한다."""
-    if source_type == "YouTube URL":
-        url = (youtube_url or "").strip()
-        if not url:
-            return None, "YouTube URL을 입력하세요."
-        try:
-            return _get_youtube_stream_url(url), None
-        except Exception as e:
-            return None, f"미리보기 URL 추출 실패: {e}"
+_controller = _CaptureController()
 
-    if source_type == "비디오 파일":
-        video_path, err = _uploaded_video_path(video_file)
-        if err:
-            return None, err
-        return str(video_path), None
 
-    return None, None
+def stop() -> str:
+    """현재 캡처를 중지하고 마지막 저장 장수를 반환한다."""
+
+    saved_count = _controller.stop()
+    return f"중지됨 — {saved_count}장 저장 완료  →  {OUT_DIR.resolve()}"
 
 
 def capture(
@@ -85,199 +58,160 @@ def capture(
     folder_files=None,
     webcam_index=None,
     video_file=None,
-    emit_preview: bool = True,
 ):
-    """
-    Generator — yields (rgb_frame | None, status_str) until done or stopped.
-    source_type: "YouTube URL" | "웹캠" | "비디오 파일" | "이미지 폴더"
-    folder_files: 이미지 폴더 모드에서 gr.File 업로드 결과(파일 경로 리스트).
-    webcam_index: 웹캠 모드에서 사용할 장비 인덱스.
-    video_file: 비디오 파일 모드에서 gr.File 업로드 결과.
-    """
-    global _saved_count
-    _stop_event.clear()
-    _saved_count = 0
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    """프레임과 상태 문자열을 연속으로 생성한다."""
 
-    # 기존 프레임 삭제
-    for f in OUT_DIR.glob("frame_*.jpg"):
-        f.unlink()
+    _controller.begin()
 
-    # ── 이미지 폴더 임포트 ─────────────────────────────────────
-    if source_type == "이미지 폴더":
-        yield from _import_from_files(folder_files)
-        return
+    try:
+        if source_type == media.SOURCE_IMAGES:
+            images = media.filter_image_paths(folder_files)
+            if not folder_files:
+                yield None, "이미지 폴더(또는 파일)를 업로드하세요."
+                return
+            if not images:
+                supported = ", ".join(sorted(media.IMAGE_EXTENSIONS))
+                yield None, f"이미지 파일이 없습니다 (지원 형식: {supported})"
+                return
 
-    # ── 소스 열기 ──────────────────────────────────────────────
-    if source_type == "YouTube URL":
-        url = youtube_url.strip()
-        if not url:
-            yield None, "YouTube URL을 입력하세요."
+            _reset_output_directory()
+            yield from _import_images(images)
             return
-        yield None, "YouTube 스트림 URL 추출 중..."
+
+        if source_type == media.SOURCE_YOUTUBE:
+            yield None, "YouTube 스트림 URL 추출 중..."
+
         try:
-            stream_url = _get_youtube_stream_url(url)
-        except Exception as e:
-            yield None, f"URL 추출 실패: {e}"
-            return
-        cap = cv2.VideoCapture(stream_url)
-    elif source_type == "비디오 파일":
-        video_path, err = _uploaded_video_path(video_file)
-        if err:
-            yield None, err
-            return
-        cap = cv2.VideoCapture(str(video_path))
-    else:
-        cap = cv2.VideoCapture(webcams.coerce_webcam_index(webcam_index))
+            source = media.resolve_video_source(
+                source_type,
+                youtube_url=youtube_url,
+                webcam_index=webcam_index,
+                video_file=video_file,
+            )
+            with media.open_video_capture(source) as video:
+                _reset_output_directory()
+                yield from _capture_video(video, source, max(1, int(capture_fps)))
+        except media.MediaSourceError as exc:
+            yield None, str(exc)
+    except GeneratorExit:
+        raise
+    except Exception as exc:
+        yield None, f"프레임 추출 오류: {exc}"
 
-    if not cap.isOpened():
-        yield None, "소스를 열 수 없습니다."
-        return
 
-    src_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    # 원본 FPS가 0으로 잡히는 경우(라이브) 30 가정
-    if src_fps < 1:
-        src_fps = 30.0
-    frame_interval = max(1, round(src_fps / max(1, capture_fps)))
+def _reset_output_directory() -> None:
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    for path in OUT_DIR.glob("frame_*.jpg"):
+        path.unlink()
 
-    frame_idx = 0
-    saved = 0
-    # 저장 FPS와 미리보기 FPS를 분리한다. 저장은 capture_fps를 따르되,
-    # 화면 미리보기는 소스 FPS에 맞춰 최대 30fps까지 전송한다.
-    preview_fps = max(1, min(_MAX_PREVIEW_FPS, round(src_fps)))
-    display_interval = 1.0 / preview_fps
-    status_interval = 0.5
-    last_yield = 0.0
-    last_preview_rgb = None
-    # 일부 YouTube/파일 소스는 cap.read()가 실제 재생 속도보다 빠르게 반환된다.
-    # UI가 중간 프레임을 받을 수 있도록 원본 FPS 기준으로 읽기 루프도 페이싱한다.
-    read_interval = 1.0 / min(max(src_fps, 1.0), 30.0)
+
+def _capture_video(
+    video: cv2.VideoCapture,
+    source: media.VideoSource,
+    target_fps: int,
+):
+    source_fps = media.capture_fps(video)
+    save_every = max(1, round(source_fps / target_fps))
+    preview_fps = max(1, min(_MAX_PREVIEW_FPS, round(source_fps)))
+    preview_interval = 1.0 / preview_fps
+    read_interval = 1.0 / min(max(source_fps, 1.0), 30.0)
+
+    frame_index = 0
+    saved_count = 0
+    last_preview_at = 0.0
+    last_preview = None
     next_read_at = time.perf_counter()
 
-    while True:
-        if _stop_event.is_set():
+    while not _controller.stop_event.is_set():
+        if source.pace_reads:
+            wait = next_read_at - time.perf_counter()
+            if wait > 0:
+                _controller.stop_event.wait(wait)
+            if _controller.stop_event.is_set():
+                break
+            next_read_at = max(
+                next_read_at + read_interval,
+                time.perf_counter(),
+            )
+
+        ok, frame_bgr = video.read()
+        if not ok:
             break
 
-        now = time.perf_counter()
-        wait = next_read_at - now
-        if wait > 0:
-            time.sleep(wait)
-        next_read_at = max(next_read_at + read_interval, time.perf_counter())
-
-        ret, frame = cap.read()
-        if not ret:
-            break
-
-        if frame_idx % frame_interval == 0:
-            path = OUT_DIR / f"frame_{saved:05d}.jpg"
-            cv2.imwrite(str(path), frame)
-            saved += 1
-            _saved_count = saved
+        if frame_index % save_every == 0:
+            output_path = OUT_DIR / f"frame_{saved_count:05d}.jpg"
+            if not cv2.imwrite(str(output_path), frame_bgr):
+                raise OSError(f"프레임 저장 실패: {output_path}")
+            saved_count += 1
+            _controller.saved(saved_count)
 
         now = time.perf_counter()
-        interval = display_interval if emit_preview else status_interval
-        if last_yield == 0.0 or now - last_yield >= interval:
-            last_yield = now
-            if emit_preview:
-                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                last_preview_rgb = rgb
-                yield rgb, f"{saved}장 저장 중...  |  미리보기 {preview_fps}fps"
-            else:
-                yield None, f"{saved}장 저장 중...  |  비디오 미리보기 사용"
+        if last_preview_at == 0.0 or now - last_preview_at >= preview_interval:
+            last_preview_at = now
+            last_preview = vision.to_rgb(frame_bgr)
+            yield (
+                last_preview,
+                f"{saved_count}장 저장 중...  |  미리보기 {preview_fps}fps",
+            )
 
-        frame_idx += 1
+        frame_index += 1
 
-    cap.release()
-
-    if _stop_event.is_set():
-        yield last_preview_rgb, f"중지됨 — {saved}장 저장 완료  →  {OUT_DIR.resolve()}"
-    else:
-        yield last_preview_rgb, f"완료 — {saved}장 저장 완료  →  {OUT_DIR.resolve()}"
+    prefix = "중지됨" if _controller.stop_event.is_set() else "완료"
+    yield (
+        last_preview,
+        f"{prefix} — {saved_count}장 저장 완료  →  {OUT_DIR.resolve()}",
+    )
 
 
-def _uploaded_video_path(file) -> "tuple[Path | None, str | None]":
-    """gr.File 업로드 결과를 비디오 파일 Path로 정규화한다."""
-    if not file:
-        return None, "비디오 파일을 업로드하세요."
-    path = Path(getattr(file, "name", file))
-    if not path.is_file():
-        return None, f"비디오 파일을 찾을 수 없습니다: {path}"
-    if path.suffix.lower() not in _VIDEO_EXTS:
-        return None, f"지원하지 않는 비디오 형식입니다 (지원 형식: {', '.join(sorted(_VIDEO_EXTS))})"
-    return path, None
-
-
-def _imread_any_path(path: Path) -> "np.ndarray | None":
-    """cv2.imread는 한글/유니코드 경로를 못 읽으므로 np.fromfile 경유."""
-    buf = np.fromfile(str(path), dtype=np.uint8)
-    return cv2.imdecode(buf, cv2.IMREAD_COLOR)
-
-
-def _filter_image_paths(files) -> "list[Path]":
-    """gr.File 업로드 결과를 받아 지원 형식의 이미지 경로만 정렬해 반환."""
-    if not files:
-        return []
-    paths = []
-    for f in files:
-        # gr.File(type="filepath")는 경로 문자열을 주지만, 방어적으로 .name도 처리
-        p = Path(getattr(f, "name", f))
-        if p.is_file() and p.suffix.lower() in _IMAGE_EXTS:
-            paths.append(p)
-    return sorted(paths, key=lambda p: p.name)
-
-
-def _import_from_files(files):
-    """gr.File 업로드된 이미지 파일들을 raw_frames로 빠르게 복사/변환."""
-    global _saved_count
-    images = _filter_image_paths(files)
-
-    if not files:
-        yield None, "이미지 폴더(또는 파일)를 업로드하세요."
-        return
-
-    if not images:
-        yield None, f"이미지 파일이 없습니다 (지원 형식: {', '.join(sorted(_IMAGE_EXTS))})"
-        return
-
+def _import_images(images: list[Path]):
     total = len(images)
     yield None, f"{total}장 발견 — 복사 시작..."
 
-    copied = 0
-    last_yield = 0.0
-    preview_interval = 0.5
-    last_preview_rgb = None
+    copied_count = 0
+    last_preview_at = 0.0
+    last_preview = None
 
-    for idx, src_path in enumerate(images):
-        if _stop_event.is_set():
-            yield last_preview_rgb, f"중지됨 — {copied}장 복사 완료  →  {OUT_DIR.resolve()}"
-            return
+    for source_path in images:
+        if _controller.stop_event.is_set():
+            break
 
-        dst_path = OUT_DIR / f"frame_{copied:05d}.jpg"
-
+        output_path = OUT_DIR / f"frame_{copied_count:05d}.jpg"
         try:
-            bgr = None
-            if src_path.suffix.lower() in {".jpg", ".jpeg"}:
-                shutil.copyfile(src_path, dst_path)
+            frame_bgr = None
+            if source_path.suffix.lower() in {".jpg", ".jpeg"}:
+                shutil.copyfile(source_path, output_path)
             else:
-                bgr = _imread_any_path(src_path)
-                if bgr is None:
-                    yield last_preview_rgb, f"{idx + 1}/{total}  건너뜀 (읽기 실패): {src_path.name}"
+                frame_bgr = media.read_image(source_path)
+                if frame_bgr is None:
+                    yield (
+                        last_preview,
+                        f"건너뜀 (읽기 실패): {source_path.name}",
+                    )
                     continue
-                cv2.imwrite(str(dst_path), bgr)
+                if not cv2.imwrite(str(output_path), frame_bgr):
+                    raise OSError(f"이미지 저장 실패: {output_path}")
 
-            copied += 1
-            _saved_count = copied
+            copied_count += 1
+            _controller.saved(copied_count)
 
             now = time.perf_counter()
-            should_yield = copied == 1 or copied == total or now - last_yield >= preview_interval
-            if should_yield:
-                last_yield = now
-                if bgr is None:
-                    bgr = _imread_any_path(src_path)
-                if bgr is not None:
-                    last_preview_rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-                yield last_preview_rgb, f"{copied} / {total} 복사 완료"
-        except Exception as e:
-            yield last_preview_rgb, f"{src_path.name} 처리 실패: {e}"
+            should_preview = (
+                copied_count == 1
+                or copied_count == total
+                or now - last_preview_at >= _FOLDER_PREVIEW_INTERVAL
+            )
+            if should_preview:
+                last_preview_at = now
+                if frame_bgr is None:
+                    frame_bgr = media.read_image(source_path)
+                if frame_bgr is not None:
+                    last_preview = vision.to_rgb(frame_bgr)
+                yield last_preview, f"{copied_count} / {total} 복사 완료"
+        except OSError as exc:
+            yield last_preview, f"{source_path.name} 처리 실패: {exc}"
 
-    yield last_preview_rgb, f"완료 — {copied}장 복사  →  {OUT_DIR.resolve()}"
+    prefix = "중지됨" if _controller.stop_event.is_set() else "완료"
+    yield (
+        last_preview,
+        f"{prefix} — {copied_count}장 복사 완료  →  {OUT_DIR.resolve()}",
+    )

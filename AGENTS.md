@@ -108,14 +108,10 @@ yolo-webui/
   - `samples/sample.mp4`
   - `samples/sample_image/`
 - 소스별 입력칸과 샘플 버튼 표시는 **클라이언트 JS 토글**(`elem_id` + `.src-hidden` CSS 클래스)로 처리한다. Gradio 큐 왕복 없이 즉시 전환하기 위한 구조다.
-- 미리보기는 소스별로 분리한다.
-  - YouTube URL: `gr.HTML` iframe embed로 브라우저 네이티브 미리보기 표시
-  - 비디오 파일: `gr.HTML` 내부 `<video>` 태그로 브라우저 네이티브 미리보기 표시
-  - 웹캠: `gr.Video(sources=["webcam"], streaming=True)`로 클라이언트 측 미리보기 표시
-  - 이미지 폴더: `gr.Image(streaming=True)`로 임포트 진행 프레임 표시
-- 캡처 저장은 `extractor.capture(..., emit_preview=...)`에서 처리한다. `app.run_capture()`는 이미지 폴더일 때만 `emit_preview=True`로 프레임을 Gradio에 보내고, YouTube/웹캠/비디오 파일은 브라우저 네이티브 미리보기를 쓰면서 상태만 갱신한다.
-- YouTube URL은 `yt-dlp`로 스트림 URL을 추출하며 `_STREAM_CACHE_TTL = 600`초 캐시를 둔다.
+- 모든 소스의 진행 미리보기는 하나의 `gr.Image(type="numpy", streaming=True)` 출력으로 통합한다. `app.run_capture()`가 `extractor.capture()` 제너레이터의 RGB 프레임을 그대로 `yield`해 Gradio 공식 스트리밍 출력 경로를 사용한다.
+- `pipeline/media.py`가 YouTube·웹캠·비디오·이미지 경로 검증과 OpenCV 소스 열기/해제를 담당한다. YouTube URL은 `yt-dlp`로 직접 스트림 URL을 추출하며 600초 캐시를 둔다.
 - YouTube/웹캠/비디오 파일 저장은 `cv2.VideoCapture` 기반으로 읽고, `capture_fps`에 맞춰 `dataset/raw_frames/frame_XXXXX.jpg`에 저장한다.
+- `VideoCapture`는 컨텍스트 관리자로 열어 완료·오류·Gradio 이벤트 취소 여부와 무관하게 항상 `release()`한다.
 - 시작 시 `dataset/raw_frames/`의 기존 `frame_*.jpg`를 삭제한 뒤 새로 저장한다.
 - 이미지 폴더 모드는 `gr.File(file_count="directory", type="filepath")` 업로드를 사용한다. `_filter_image_paths()`가 지원 확장자만 추려 파일명 기준으로 정렬한다.
 - 이미지 폴더 임포트는 jpg/jpeg는 `shutil.copyfile()`로 재인코딩 없이 복사하고, 그 외 포맷은 유니코드 경로 안전 처리를 위해 `np.fromfile` + `cv2.imdecode` 후 jpg로 저장한다.
@@ -201,6 +197,7 @@ cls_ids = results[0].boxes.cls.cpu().numpy().astype(int)
 
 - 소스: Tab 1과 동일 (YouTube URL / 웹캠 / 비디오 파일 / 이미지 폴더), 영상은 `cv2.VideoCapture` 직접 사용
 - 이미지 폴더 모드(`_predict_folder`): 업로드된 이미지를 순회하며 장당 추론·표시, 중지 전까지 반복(0.4초 간격)
+- 영상 소스 정규화와 이미지 로딩은 `pipeline/media.py`, bbox 표시와 RGB/크기 변환은 `pipeline/vision.py`를 프레임 추출·침입 감지 탭과 공유한다.
 - 폴더 입력은 `gr.File(file_count="directory")` 업로드. 업로드가 비어 있으면 **Tab 1 업로드 파일을 자동 상속**(`_inherit_folder`)
 - `infer_every`: N프레임마다 1회 추론, 나머지는 마지막 bbox 재사용 (기본값 3)
 - `display_interval = 1/15`: 15fps로 yield 제한 → Gradio WebSocket 부담 최소화
@@ -215,6 +212,7 @@ cls_ids = results[0].boxes.cls.cpu().numpy().astype(int)
 
 - 소스: Tab 1/5와 동일 (YouTube URL / 웹캠 / 비디오 파일 / 이미지 폴더)
 - 이미지 폴더 모드(`_stream_folder`): 업로드 이미지 순회하며 `_last_frame` 갱신(→ 영역 설정 가능) + 침입 판별, 중지 전까지 반복
+- 영상 소스 정규화와 이미지 로딩은 `pipeline/media.py`, bbox 표시와 RGB/크기 변환은 `pipeline/vision.py`를 프레임 추출·추론 탭과 공유한다.
 - 폴더 입력은 `gr.File(file_count="directory")` 업로드. 업로드가 비어 있으면 Tab 1 업로드 파일 자동 상속
 - zone 오버레이 로직은 `_render_zones()` 헬퍼로 추출 — 비디오/폴더 루프 공유
 - **YOLO 모델 선택은 학습된 모델 드롭다운**(`gr.Dropdown`, `models.list_trained_models()` 공유) — Tab 5 추론과 동일하게 생성 날짜 표시 + 최신순 + 새로고침 버튼/탭 진입 자동 갱신(`panel_zone.select`)
