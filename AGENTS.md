@@ -232,6 +232,30 @@ cls_ids = results[0].boxes.cls.cpu().numpy().astype(int)
 - zone 라벨은 항상 영어로 출력 (시스템 프롬프트 강제)
 - Ollama API: `http://localhost:11434/api/chat`, `format="json"` 강제
 - 중지 버튼: 스트림 종료 + `_zones` 초기화 + `_last_frame` 초기화
+- 영역 상태는 `gr.State`의 세션 ID별 `ZoneRuntime`으로 분리한다. 실시간 영상과
+  Track 목록은 「현재 프레임 가져오기」 시 함께 고정하며, 고정 편집 이미지의
+  `SelectData.index` 좌표를 정규화해 수동 다각형 꼭짓점으로 저장한다.
+- 라바콘 추적 모드는 `YOLO.track(..., persist=True, tracker="bytetrack.yaml")`를
+  사용한다. 사용자가 같은 클래스 bbox를 3개 이상 클릭하면 Track ID와 bbox 바닥
+  중앙을 anchor로 저장하며, 추적 영역이 활성화된 동안 추론 간격을 1로 강제한다.
+- 추적 anchor 유실 시 마지막 위치를 유지하고 주황색으로 표시한다. 모든 추적
+  anchor ID는 침입 집계에서 제외하며, 겹친 영역의 같은 Track ID는 한 번만 센다.
+- Ollama 모델은 화면의 다운로드 버튼이 `/api/tags`로 설치 여부를 확인하고
+  `/api/pull` 스트림으로 `gemma4:e4b`를 명시적으로 설치한다.
+
+---
+
+## 중앙 모델 레지스트리 / Raspberry Pi 동기화
+
+- `YOLO_NODE_ROLE=registry`: 정상 학습 종료 모델을 SHA-256 content-addressed blob으로
+  게시하고 `/model-registry/v1` API를 제공한다. 읽기/업로드는 각각 Bearer 토큰으로
+  보호하며 외부 bind 시 Gradio UI 인증을 요구한다.
+- `YOLO_NODE_ROLE=edge`: 시작 즉시 및 설정 주기마다 최신 릴리스를 확인한다. 임시
+  폴더에 스트리밍 다운로드한 뒤 크기와 SHA-256을 검증하고
+  `runs/detect/remote-<run>-<release>/weights/best.pt`로 원자 이동한다.
+- edge는 매 확인 시 설치 파일 SHA-256을 다시 검증한다. 손상·삭제된 파일은 같은
+  릴리스를 다시 내려받으며, 진행 중인 추론 모델은 바꾸지 않고 다음 실행부터 새
+  모델을 사용한다.
 
 ---
 

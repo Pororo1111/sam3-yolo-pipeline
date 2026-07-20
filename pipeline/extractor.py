@@ -18,6 +18,10 @@ _MAX_PREVIEW_FPS = 10
 _FOLDER_PREVIEW_INTERVAL = 0.2
 
 
+def _valid_frame(frame) -> bool:
+    return frame is not None and getattr(frame, "size", 0) > 0
+
+
 class _CaptureController:
     """현재 캡처 작업의 취소 신호와 진행량을 동기화한다."""
 
@@ -36,9 +40,18 @@ class _CaptureController:
             self._saved_count = count
 
     def stop(self) -> int:
-        self.stop_event.set()
         with self._lock:
+            self.stop_event.set()
             return self._saved_count
+
+    def prepare_output(self) -> bool:
+        """중지 요청과 출력 초기화가 엇갈리지 않도록 원자적으로 준비한다."""
+
+        with self._lock:
+            if self.stop_event.is_set():
+                return False
+            _reset_output_directory()
+            return True
 
 
 _controller = _CaptureController()
@@ -74,7 +87,9 @@ def capture(
                 yield None, f"이미지 파일이 없습니다 (지원 형식: {supported})"
                 return
 
-            _reset_output_directory()
+            if not _controller.prepare_output():
+                yield None, stop()
+                return
             yield from _import_images(images)
             return
 
@@ -89,8 +104,21 @@ def capture(
                 video_file=video_file,
             )
             with media.open_video_capture(source) as video:
-                _reset_output_directory()
-                yield from _capture_video(video, source, max(1, int(capture_fps)))
+                ok, first_frame = video.read()
+                if not ok or not _valid_frame(first_frame):
+                    raise media.MediaSourceError(
+                        "소스는 열렸지만 첫 프레임을 읽지 못했습니다. "
+                        "웹캠 권한·장치 점유 또는 영상 파일 상태를 확인하세요."
+                    )
+                if not _controller.prepare_output():
+                    yield None, stop()
+                    return
+                yield from _capture_video(
+                    video,
+                    source,
+                    max(1, int(capture_fps)),
+                    first_frame=first_frame,
+                )
         except media.MediaSourceError as exc:
             yield None, str(exc)
     except GeneratorExit:
@@ -109,6 +137,7 @@ def _capture_video(
     video: cv2.VideoCapture,
     source: media.VideoSource,
     target_fps: int,
+    first_frame=None,
 ):
     source_fps = media.capture_fps(video)
     save_every = max(1, round(source_fps / target_fps))
@@ -121,6 +150,7 @@ def _capture_video(
     last_preview_at = 0.0
     last_preview = None
     next_read_at = time.perf_counter()
+    pending_frame = first_frame
 
     while not _controller.stop_event.is_set():
         if source.pace_reads:
@@ -134,8 +164,27 @@ def _capture_video(
                 time.perf_counter(),
             )
 
-        ok, frame_bgr = video.read()
-        if not ok:
+        if pending_frame is not None:
+            ok, frame_bgr = True, pending_frame
+            pending_frame = None
+        else:
+            ok, frame_bgr = video.read()
+            if (not ok or not _valid_frame(frame_bgr)) and source.source_type == media.SOURCE_WEBCAM:
+                # USB/V4L2 카메라는 일시적으로 빈 프레임을 반환할 수 있다.
+                for _ in range(4):
+                    if _controller.stop_event.wait(0.05):
+                        break
+                    ok, frame_bgr = video.read()
+                    if ok and _valid_frame(frame_bgr):
+                        break
+        if not ok or not _valid_frame(frame_bgr):
+            if (
+                source.source_type == media.SOURCE_WEBCAM
+                and not _controller.stop_event.is_set()
+            ):
+                raise media.MediaSourceError(
+                    "웹캠 프레임을 연속으로 읽지 못했습니다. 장치 연결과 점유 상태를 확인하세요."
+                )
             break
 
         if frame_index % save_every == 0:

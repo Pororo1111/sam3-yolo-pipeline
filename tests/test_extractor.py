@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from unittest import mock
 
@@ -57,6 +58,74 @@ class ExtractorTests(unittest.TestCase):
 
             self.assertTrue(existing.exists())
             self.assertIn("업로드", outputs[-1][1])
+
+    def test_unreadable_open_source_preserves_existing_frames(self):
+        class UnreadableCapture:
+            def read(self):
+                return False, None
+
+        @contextmanager
+        def open_capture(_source):
+            yield UnreadableCapture()
+
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory) / "raw_frames"
+            output_dir.mkdir()
+            existing = output_dir / "frame_00000.jpg"
+            existing.write_bytes(b"existing")
+
+            source = media.VideoSource("camera", media.SOURCE_WEBCAM, False)
+            with (
+                mock.patch.object(extractor, "OUT_DIR", output_dir),
+                mock.patch.object(media, "resolve_video_source", return_value=source),
+                mock.patch.object(media, "open_video_capture", side_effect=open_capture),
+            ):
+                outputs = list(
+                    extractor.capture(
+                        media.SOURCE_WEBCAM,
+                        "",
+                        5,
+                        webcam_index="0",
+                    )
+                )
+
+            self.assertEqual(existing.read_bytes(), b"existing")
+            self.assertIn("첫 프레임", outputs[-1][1])
+
+    def test_stop_during_first_read_preserves_existing_frames(self):
+        frame = np.zeros((8, 8, 3), dtype=np.uint8)
+
+        class StopDuringReadCapture:
+            def read(self):
+                extractor._controller.stop_event.set()
+                return True, frame
+
+        @contextmanager
+        def open_capture(_source):
+            yield StopDuringReadCapture()
+
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory) / "raw_frames"
+            output_dir.mkdir()
+            existing = output_dir / "frame_00000.jpg"
+            existing.write_bytes(b"existing")
+            source = media.VideoSource("camera", media.SOURCE_WEBCAM, False)
+            with (
+                mock.patch.object(extractor, "OUT_DIR", output_dir),
+                mock.patch.object(media, "resolve_video_source", return_value=source),
+                mock.patch.object(media, "open_video_capture", side_effect=open_capture),
+            ):
+                outputs = list(
+                    extractor.capture(
+                        media.SOURCE_WEBCAM,
+                        "",
+                        5,
+                        webcam_index="0",
+                    )
+                )
+
+            self.assertEqual(existing.read_bytes(), b"existing")
+            self.assertIn("중지됨", outputs[-1][1])
 
 
 if __name__ == "__main__":

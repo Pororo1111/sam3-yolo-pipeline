@@ -151,11 +151,11 @@ def resolve_video_source(
     """UI 입력을 OpenCV용 영상 소스로 변환한다."""
 
     if source_type == SOURCE_WEBCAM:
-        return VideoSource(
-            value=webcams.coerce_webcam_index(webcam_index),
-            source_type=source_type,
-            pace_reads=False,
-        )
+        try:
+            index = webcams.coerce_webcam_index(webcam_index)
+        except webcams.WebcamOpenError as exc:
+            raise MediaSourceError(str(exc)) from exc
+        return VideoSource(value=index, source_type=source_type, pace_reads=False)
     if source_type == SOURCE_VIDEO:
         return VideoSource(
             value=str(uploaded_video_path(video_file)),
@@ -176,7 +176,10 @@ def open_video_capture(source: VideoSource) -> Iterator[cv2.VideoCapture]:
     """영상 소스를 열고 성공·실패·취소 여부와 무관하게 핸들을 해제한다."""
 
     if source.source_type == SOURCE_WEBCAM:
-        capture = webcams.open_webcam(source.value)
+        try:
+            capture = webcams.open_webcam(source.value)
+        except webcams.WebcamOpenError as exc:
+            raise MediaSourceError(str(exc)) from exc
     else:
         capture = cv2.VideoCapture(source.value)
 

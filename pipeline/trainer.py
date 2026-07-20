@@ -1,4 +1,5 @@
 import logging
+import os
 import re
 import threading
 import time
@@ -196,6 +197,22 @@ def train(epochs: int, imgsz: int, batch: int, lr0: float, device: str,
     best = (save_dir_box[0] / "weights" / "best.pt") if save_dir_box[0] else None
     if best and best.exists():
         accumulated += f"\n학습 완료!\nbest.pt → {best.resolve()}\n"
+        if os.getenv("YOLO_NODE_ROLE", "standalone").strip().lower() == "registry":
+            try:
+                from pipeline.model_registry import ModelRegistry
+
+                release = ModelRegistry().publish_model(
+                    best,
+                    best.parent.parent.name,
+                    source="trained",
+                )
+                accumulated += (
+                    "중앙 모델 릴리스 게시 완료 "
+                    f"(release={release.release_id[:8]})\n"
+                )
+            except Exception as exc:
+                # 학습 결과 자체는 유효하므로 게시 실패를 학습 실패로 바꾸지 않는다.
+                accumulated += f"모델 릴리스 게시 실패: {exc}\n"
     else:
         candidates = sorted(_PROJECT.glob("*/weights/best.pt"))
         if candidates:

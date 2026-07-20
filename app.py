@@ -1,8 +1,22 @@
 import html as _html
+import asyncio
+import os
+from contextlib import asynccontextmanager
+from ipaddress import ip_address
 from pathlib import Path
 
 import gradio as gr
-from pipeline import extractor, labeler, dataset, trainer, inference, zone_monitor, models, webcams
+from pipeline import (
+    dataset,
+    extractor,
+    inference,
+    labeler,
+    models,
+    ollama_client,
+    trainer,
+    webcams,
+    zone_monitor,
+)
 
 
 SAMPLES_DIR = Path("samples")
@@ -68,35 +82,43 @@ def run_capture(source_type, youtube_url, capture_fps, folder_files, webcam_inde
     )
 
 
-def prepare_capture_preview(source_type, youtube_url, video_file):
-    """모든 영상 소스가 공유하는 Gradio 이미지 스트림을 초기화한다."""
-    return (
-        gr.update(value="", visible=False),
-        gr.update(value="", visible=False),
-        gr.update(visible=False),
-        gr.update(value=None, visible=True),
-        "실시간 미리보기를 준비합니다.",
-    )
+def prepare_capture_preview():
+    """공용 이미지 스트림을 비우고 새 캡처를 준비한다."""
+    return None, "실시간 미리보기를 준비합니다."
 
 
 def stop_capture_and_reset():
     """캡처 중지 후 미리보기 영역을 초기 상태로 되돌린다."""
     status = extractor.stop()
-    return (
-        gr.update(value="", visible=False),
-        gr.update(value="", visible=False),
-        gr.update(value=None, visible=False),
-        gr.update(value=None, visible=True),
-        status,
-    )
+    return None, status
 
 
 def run_inference(model_path, source_type, youtube_url, conf, infer_every, folder_files, webcam_index, video_file):
     yield from inference.predict(model_path, source_type, youtube_url, conf, infer_every, folder_files, webcam_index, video_file)
 
 
-def run_zone_stream(source_type, youtube_url, model_path, conf, infer_every, folder_files, webcam_index, video_file):
-    yield from zone_monitor.stream(source_type, youtube_url, model_path, conf, infer_every, folder_files, webcam_index, video_file)
+def run_zone_stream(
+    session_id,
+    source_type,
+    youtube_url,
+    model_path,
+    conf,
+    infer_every,
+    folder_files,
+    webcam_index,
+    video_file,
+):
+    yield from zone_monitor.stream(
+        session_id,
+        source_type,
+        youtube_url,
+        model_path,
+        conf,
+        infer_every,
+        folder_files,
+        webcam_index,
+        video_file,
+    )
 
 
 def load_classes(label_prompts):
@@ -142,6 +164,11 @@ def on_gallery_select(prompts_str, filter_empty, evt: gr.SelectData):
     return dataset.select_frame(prompts_str, filter_empty, evt)
 
 
+def on_zone_editor_select(session_id, mode, evt: gr.SelectData):
+    """고정 편집 프레임의 자연 크기 좌표를 영역 서비스에 전달한다."""
+    return zone_monitor.select_editor_point(session_id, mode, evt.index)
+
+
 def run_label_preview(prompts_str, conf, n_preview):
     yield from labeler.preview(prompts_str, float(conf), int(n_preview))
 
@@ -171,11 +198,6 @@ _CSS = (
     # 미리보기 갤러리: 항상 4열 격자로 고정. Gradio는 이미지 수에 맞춰 --grid-cols를
     # 줄여(1장이면 1열) 이미지가 칸 전체로 커지므로, grid-template-columns를 4열로 강제.
     "#label_gallery .grid-container { grid-template-columns: repeat(4, minmax(0, 1fr)) !important; }"
-    "#cap_webcam_preview video { max-height: 520px; object-fit: contain; background: #111; }"
-    ".youtube-preview { width: 100%; aspect-ratio: 16 / 9; background: #111; }"
-    ".youtube-preview iframe { width: 100%; height: 100%; border: 0; display: block; }"
-    ".local-video-preview { width: 100%; aspect-ratio: 16 / 9; background: #111; }"
-    ".local-video-preview video { width: 100%; height: 100%; object-fit: contain; display: block; }"
     ".sample-card button { min-height: 72px; border: 1px solid #d4d4d8 !important; "
     "background: #fff !important; color: #18181b !important; text-align: left; "
     "justify-content: flex-start; box-shadow: 0 1px 2px rgba(0,0,0,.06); }"
@@ -275,24 +297,7 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
                 cap_start_btn = gr.Button("캡처 시작", variant="primary")
                 cap_stop_btn  = gr.Button("중지", variant="stop")
 
-            cap_youtube_preview = gr.HTML(
-                label="YouTube 미리보기",
-                visible=False,
-            )
-            cap_video_preview = gr.HTML(
-                label="영상 미리보기",
-                visible=False,
-                elem_id="cap_video_preview",
-            )
-            cap_webcam_preview = gr.Video(
-                label="웹캠 미리보기",
-                sources=["webcam"],
-                streaming=True,
-                autoplay=True,
-                visible=False,
-                elem_id="cap_webcam_preview",
-            )
-            cap_preview = gr.Image(label="이미지 폴더 미리보기", type="numpy", streaming=True)
+            cap_preview = gr.Image(label="실시간 미리보기", type="numpy", streaming=True)
             cap_status  = gr.Textbox(label="상태", interactive=False)
 
             youtube_sample_btn.click(
@@ -310,8 +315,7 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
 
             cap_prepare_event = cap_start_btn.click(
                 fn=prepare_capture_preview,
-                inputs=[source_type, youtube_url, video_file],
-                outputs=[cap_youtube_preview, cap_video_preview, cap_webcam_preview, cap_preview, cap_status],
+                outputs=[cap_preview, cap_status],
             )
             capture_event = cap_prepare_event.then(
                 fn=run_capture,
@@ -323,7 +327,7 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
             )
             cap_stop_btn.click(
                 fn=stop_capture_and_reset,
-                outputs=[cap_youtube_preview, cap_video_preview, cap_webcam_preview, cap_preview, cap_status],
+                outputs=[cap_preview, cap_status],
                 cancels=[capture_event],
             )
             webcam_refresh.click(
@@ -749,6 +753,11 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
         # ── 침입 감지 ────────────────────────────────────────
         with gr.Tab("침입 감지") as panel_zone:
             gr.Markdown("### 로컬 LLM 영역 설정 & 실시간 침입 감지")
+            zm_session_id = gr.State(
+                value=zone_monitor.create_session,
+                time_to_live=3600,
+                delete_callback=zone_monitor.delete_session,
+            )
 
             _zm_models = models.list_trained_models()
             with gr.Row():
@@ -865,6 +874,37 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
             zm_preview = gr.Image(label="실시간 영상", type="numpy", streaming=True)
             zm_stream_status = gr.Textbox(label="상태", interactive=False)
 
+            gr.Markdown("#### 마우스 다각형 / 라바콘 추적 영역")
+            gr.Markdown(
+                "스트림을 시작한 뒤 **현재 프레임 가져오기**를 누르세요. "
+                "수동 모드는 빈 화면의 꼭짓점을, 라바콘 추적 모드는 검출 bbox를 "
+                "순서대로 3개 이상 클릭하고 완료합니다. 추적 모드는 `추론 간격 1`을 권장합니다."
+            )
+            with gr.Row():
+                zm_snapshot_btn = gr.Button("현재 프레임 가져오기", variant="secondary")
+                zm_zone_mode = gr.Radio(
+                    choices=[
+                        ("수동 다각형", zone_monitor.MODE_MANUAL),
+                        ("라바콘 추적 (ByteTrack)", zone_monitor.MODE_TRACKED),
+                    ],
+                    value=zone_monitor.MODE_MANUAL,
+                    label="클릭 모드",
+                )
+                zm_zone_label = gr.Textbox(
+                    label="영역 이름",
+                    placeholder="예: Entrance / Cone zone",
+                )
+            zm_zone_editor = gr.Image(
+                label="영역 편집 (고정 프레임을 클릭하세요)",
+                type="numpy",
+                interactive=False,
+            )
+            with gr.Row():
+                zm_undo_btn = gr.Button("마지막 점 취소")
+                zm_clear_draft_btn = gr.Button("작성 중인 점 지우기")
+                zm_finish_btn = gr.Button("다각형 완료", variant="primary")
+                zm_clear_zones_btn = gr.Button("모든 영역 지우기", variant="stop")
+
             zm_youtube_sample_btn.click(
                 fn=load_sample_youtube_url,
                 outputs=[zm_youtube_url, zm_stream_status],
@@ -894,24 +934,85 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
                     scale=1,
                 )
 
-            zm_set_btn = gr.Button("영역 설정 (LLM 분석)", variant="secondary")
+            with gr.Row():
+                zm_set_btn = gr.Button("영역 설정 (LLM 분석)", variant="secondary")
+                zm_pull_btn = gr.Button("Gemma 모델 다운로드")
 
             zm_zone_status  = gr.Textbox(label="영역 설정 결과", interactive=False)
+            zm_pull_status = gr.Textbox(label="Ollama 모델 상태", interactive=False)
             zm_llm_log      = gr.Code(label="LLM 응답 (JSON)", language="json", interactive=False)
 
-            zm_stream_event = zm_start_btn.click(
+            zm_prepare_event = zm_start_btn.click(
+                fn=zone_monitor.prepare_stream,
+                inputs=zm_session_id,
+                outputs=[zm_preview, zm_zone_editor, zm_stream_status, zm_zone_status],
+                show_progress="hidden",
+            )
+            zm_stream_event = zm_prepare_event.then(
                 fn=run_zone_stream,
-                inputs=[zm_source_type, zm_youtube_url, zm_model_path, zm_conf, zm_skip, zm_folder_files, zm_webcam_index, zm_video_file],
+                inputs=[zm_session_id, zm_source_type, zm_youtube_url, zm_model_path, zm_conf, zm_skip, zm_folder_files, zm_webcam_index, zm_video_file],
                 outputs=[zm_preview, zm_stream_status],
+                concurrency_id="zone_stream",
+                concurrency_limit=1,
             )
             zm_stop_btn.click(
                 fn=zone_monitor.reset,
+                inputs=zm_session_id,
+                outputs=[zm_preview, zm_zone_editor, zm_stream_status, zm_zone_status],
                 cancels=[zm_stream_event],
             )
             zm_set_btn.click(
                 fn=zone_monitor.set_zone,
-                inputs=[zm_prompt, zm_model],
+                inputs=[zm_session_id, zm_prompt, zm_model],
                 outputs=[zm_zone_status, zm_llm_log],
+            )
+            zm_pull_btn.click(
+                fn=ollama_client.pull_model,
+                inputs=zm_model,
+                outputs=zm_pull_status,
+                show_progress="hidden",
+            )
+            zm_snapshot_btn.click(
+                fn=zone_monitor.capture_editor_frame,
+                inputs=zm_session_id,
+                outputs=[zm_zone_editor, zm_zone_status],
+                concurrency_id="zone_editor",
+                concurrency_limit=1,
+            )
+            zm_zone_editor.select(
+                fn=on_zone_editor_select,
+                inputs=[zm_session_id, zm_zone_mode],
+                outputs=[zm_zone_editor, zm_zone_status],
+                concurrency_id="zone_editor",
+                concurrency_limit=1,
+            )
+            zm_undo_btn.click(
+                fn=zone_monitor.undo_draft_point,
+                inputs=[zm_session_id, zm_zone_mode],
+                outputs=[zm_zone_editor, zm_zone_status],
+                concurrency_id="zone_editor",
+                concurrency_limit=1,
+            )
+            zm_clear_draft_btn.click(
+                fn=zone_monitor.clear_draft,
+                inputs=zm_session_id,
+                outputs=[zm_zone_editor, zm_zone_status],
+                concurrency_id="zone_editor",
+                concurrency_limit=1,
+            )
+            zm_finish_btn.click(
+                fn=zone_monitor.finish_draft,
+                inputs=[zm_session_id, zm_zone_mode, zm_zone_label],
+                outputs=[zm_zone_editor, zm_zone_status],
+                concurrency_id="zone_editor",
+                concurrency_limit=1,
+            )
+            zm_clear_zones_btn.click(
+                fn=zone_monitor.clear_zones,
+                inputs=zm_session_id,
+                outputs=[zm_zone_editor, zm_zone_status],
+                concurrency_id="zone_editor",
+                concurrency_limit=1,
             )
             zm_model_refresh.click(
                 fn=refresh_model_dropdown,
@@ -945,10 +1046,116 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
 
 
 if __name__ == "__main__":
-    # 시작 시 학습용 베이스 모델(yolo26n.pt)이 models/ 에 없으면 자동 다운로드
-    models.ensure_models()
-    demo.queue().launch(
+    role = os.getenv("YOLO_NODE_ROLE", "standalone").strip().lower()
+    if role not in {"standalone", "registry", "edge"}:
+        raise RuntimeError(
+            "YOLO_NODE_ROLE은 standalone, registry, edge 중 하나여야 합니다."
+        )
+    # edge는 중앙의 학습 완료 모델을 먼저 받으므로 불필요한 베이스 모델 다운로드를 생략한다.
+    if role != "edge":
+        models.ensure_models()
+
+    from fastapi import FastAPI
+    import uvicorn
+
+    from pipeline import model_registry, model_sync
+
+    registry = model_registry.registry_from_environment() if role == "registry" else None
+    sync_worker = model_sync.worker_from_environment() if role == "edge" else None
+
+    @asynccontextmanager
+    async def lifespan(_app):
+        if registry is not None:
+            published = await asyncio.to_thread(registry.publish_latest_existing_if_empty)
+            if published is not None:
+                print(
+                    "[model-registry] 기존 최신 모델 게시 완료: "
+                    f"{published.run_name} ({published.release_id[:8]})"
+                )
+        if sync_worker is not None:
+            sync_worker.start()
+            print("[model-sync] 중앙 모델 자동 동기화를 시작했습니다.")
+        try:
+            yield
+        finally:
+            if sync_worker is not None:
+                stopped = await asyncio.to_thread(sync_worker.stop)
+                if not stopped:
+                    print("[model-sync] 종료 시간 안에 동기화 작업이 끝나지 않았습니다.")
+
+    api = FastAPI(title="YOLO Pipeline", lifespan=lifespan)
+    if registry is not None:
+        read_token = os.getenv("YOLO_REGISTRY_READ_TOKEN", "").strip()
+        if not read_token:
+            raise RuntimeError(
+                "registry 역할에는 YOLO_REGISTRY_READ_TOKEN이 필요합니다."
+            )
+        publish_token = os.getenv("YOLO_REGISTRY_PUBLISH_TOKEN", "").strip()
+        max_model_bytes = model_registry.max_model_bytes_from_environment()
+        if publish_token:
+            api.add_middleware(
+                model_registry.RegistryUploadGuardMiddleware,
+                publish_token=publish_token,
+                max_model_bytes=max_model_bytes,
+            )
+        api.include_router(
+            model_registry.create_router(
+                registry,
+                read_token=read_token,
+                publish_token=publish_token,
+                max_model_bytes=max_model_bytes,
+            )
+        )
+
+    host = os.getenv(
+        "YOLO_APP_HOST",
+        os.getenv("GRADIO_SERVER_NAME", "127.0.0.1"),
+    )
+    try:
+        port = int(
+            os.getenv(
+                "YOLO_APP_PORT",
+                os.getenv("GRADIO_SERVER_PORT", "7860"),
+            )
+        )
+    except ValueError as exc:
+        raise RuntimeError("YOLO_APP_PORT는 정수여야 합니다.") from exc
+
+    ui_user = os.getenv("YOLO_UI_USER", "").strip()
+    ui_password = os.getenv("YOLO_UI_PASSWORD", "").strip()
+    if bool(ui_user) != bool(ui_password):
+        raise RuntimeError("YOLO_UI_USER와 YOLO_UI_PASSWORD는 함께 설정해야 합니다.")
+    ui_auth = (ui_user, ui_password) if ui_user and ui_password else None
+
+    def is_loopback_host(value: str) -> bool:
+        if value.lower() == "localhost":
+            return True
+        try:
+            return ip_address(value).is_loopback
+        except ValueError:
+            return False
+
+    allow_unauthenticated_ui = (
+        os.getenv("YOLO_ALLOW_UNAUTHENTICATED_UI", "0").strip() == "1"
+    )
+    requires_ui_auth = role == "registry" or not is_loopback_host(host)
+    if requires_ui_auth and ui_auth is None and not allow_unauthenticated_ui:
+        raise RuntimeError(
+            "registry 역할 또는 외부 주소에 여는 UI에는 "
+            "YOLO_UI_USER/YOLO_UI_PASSWORD를 설정하세요. "
+            "역방향 프록시에서 인증하는 경우에만 "
+            "YOLO_ALLOW_UNAUTHENTICATED_UI=1을 명시하세요."
+        )
+
+    server_app = gr.mount_gradio_app(
+        api,
+        demo.queue(),
+        path="/",
+        server_name=host,
+        server_port=port,
+        auth=ui_auth,
         theme=gr.themes.Default(),
         css=_CSS,
         allowed_paths=[str(SAMPLES_DIR.resolve())],
     )
+    uvicorn.run(server_app, host=host, port=port)

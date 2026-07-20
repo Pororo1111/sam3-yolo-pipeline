@@ -46,7 +46,17 @@ def draw_boxes(
         class_id = int(box.cls[0])
         confidence = float(box.conf[0])
         color = color_provider(class_id)
-        label = f"{names.get(class_id, class_id)} {confidence:.2f}"
+        track_id = getattr(box, "id", None)
+        if track_id is not None:
+            try:
+                value = track_id[0]
+                if hasattr(value, "item"):
+                    value = value.item()
+                track_id = int(value)
+            except (TypeError, ValueError, IndexError, RuntimeError):
+                track_id = None
+        track_label = f" #{track_id}" if track_id is not None else ""
+        label = f"{names.get(class_id, class_id)}{track_label} {confidence:.2f}"
         cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
         cv2.putText(
             annotated,
