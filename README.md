@@ -13,7 +13,6 @@ YouTube URL, 웹캠, 비디오 파일, 이미지 폴더를 입력으로 받아 �
 - YOLO 학습: 학습 로그 스트리밍, 결과 모델 저장
 - 추론: 학습된 모델로 영상/이미지 소스 추론
 - 침입 감지: 고정 프레임을 클릭해 수동 다각형을 만들거나, 선택한 라바콘을 ByteTrack으로 추적해 영역 내 객체 감지
-- 모델 자동 배포: 중앙 서버의 최신 학습·업로드 모델을 Raspberry Pi가 검증 후 자동 다운로드
 - 샘플 불러오기: `samples/`의 URL, 비디오, 이미지 폴더를 카드 버튼으로 선택
 
 ## 설치
@@ -43,7 +42,7 @@ bash install_cpu.sh
 
 ```powershell
 venv\Scripts\Activate.ps1
-python app.py
+gradio app.py
 ```
 
 브라우저에서 `http://localhost:7860`에 접속합니다.
@@ -71,68 +70,6 @@ ZIP 데이터셋은 안전 검사를 거쳐 `dataset/external/`에 압축 해제
 첫 재매핑 때는 staged 라벨을 생성하므로 데이터셋 크기에 따라 시간이 걸릴 수
 있지만, 원본 경로·클래스·라벨이 바뀌지 않으면 검증된 캐시를 재사용합니다.
 `dataset/imported/` 경로에는 의존하지 않습니다.
-
-## 중앙 서버 → Raspberry Pi 모델 자동 동기화
-
-중앙 서버는 학습이 정상 종료된 `best.pt`를 SHA-256 기반 불변 릴리스로 자동
-게시합니다. Pi는 시작 직후 한 번, 이후 기본 60초마다 최신 릴리스를 확인합니다.
-다운로드는 임시 폴더에서 크기와 SHA-256을 검증한 뒤에만
-`runs/detect/remote-.../weights/best.pt`로 원자 배치됩니다.
-
-먼저 읽기 토큰과 UI 암호를 준비합니다.
-
-```powershell
-python -c "import secrets; print(secrets.token_urlsafe(32))"
-```
-
-중앙 학습 서버:
-
-```powershell
-$env:YOLO_NODE_ROLE="registry"
-$env:YOLO_APP_HOST="0.0.0.0"
-$env:YOLO_REGISTRY_READ_TOKEN="위에서-생성한-긴-토큰"
-$env:YOLO_REGISTRY_PUBLISH_TOKEN="별도로-생성한-게시-토큰"
-$env:YOLO_UI_USER="admin"
-$env:YOLO_UI_PASSWORD="충분히-긴-암호"
-python app.py
-```
-
-Raspberry Pi(edge):
-
-```bash
-export YOLO_NODE_ROLE=edge
-export YOLO_APP_HOST=0.0.0.0
-export YOLO_REGISTRY_URL=https://중앙서버주소
-export YOLO_REGISTRY_READ_TOKEN='중앙과-같은-읽기-토큰'
-export YOLO_MODEL_SYNC_INTERVAL_SEC=60
-export YOLO_UI_USER='admin'
-export YOLO_UI_PASSWORD='충분히-긴-암호'
-python app.py
-```
-
-`registry` 역할은 bind 주소와 관계없이, 그 밖의 역할은 외부 주소(`0.0.0.0`
-포함)에 bind할 때 UI 인증이 필수입니다. 인증을 담당하는 HTTPS 역방향 프록시
-뒤에서만 `YOLO_ALLOW_UNAUTHENTICATED_UI=1`로 앱 자체 인증을 끄세요.
-
-HTTPS 없이 신뢰된 내부 LAN의 `http://` 주소를 사용할 때만 Pi에
-`YOLO_ALLOW_INSECURE_HTTP=1`을 명시하세요. 이 경우 토큰이 평문 네트워크에
-노출될 수 있으므로 Tailscale/WireGuard 또는 HTTPS 사용을 권장합니다.
-
-외부 `.pt` 모델은 게시 토큰으로 중앙 API에 업로드할 수도 있습니다.
-
-```bash
-curl -H "Authorization: Bearer $YOLO_REGISTRY_PUBLISH_TOKEN" \
-  -F "run_name=cone-detector" \
-  -F "file=@best.pt" \
-  http://127.0.0.1:7860/model-registry/v1/releases
-```
-
-관련 환경변수:
-
-- `YOLO_MODEL_MAX_BYTES`: 모델/업로드 최대 크기(기본 1 GiB)
-- `YOLO_REGISTRY_CA_BUNDLE`: 사설 CA 인증서 경로
-- `YOLO_SYNC_CONNECT_TIMEOUT_SEC`: 연결 제한 시간(기본 5초)
-- `YOLO_SYNC_READ_TIMEOUT_SEC`: 네트워크 무응답 제한 시간(기본 15초, 최대 30초)
 
 ## 폴더 구조
 

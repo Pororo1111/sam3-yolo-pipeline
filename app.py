@@ -1,6 +1,4 @@
 import html as _html
-import os
-from ipaddress import ip_address
 from pathlib import Path
 
 import gradio as gr
@@ -1275,69 +1273,10 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
     panel_train.select(refresh_base_model_dropdown, outputs=base_model_dd)
 
 
-def create_server_app():
-    """Gradio UI를 호스트·포트·인증 설정과 함께 제공한다."""
-
-    from fastapi import FastAPI
-
-    api = FastAPI(title="YOLO Pipeline")
-
-    host = os.getenv(
-        "YOLO_APP_HOST",
-        os.getenv("GRADIO_SERVER_NAME", "127.0.0.1"),
-    )
-    try:
-        port = int(
-            os.getenv(
-                "YOLO_APP_PORT",
-                os.getenv("GRADIO_SERVER_PORT", "7860"),
-            )
-        )
-    except ValueError as exc:
-        raise RuntimeError("YOLO_APP_PORT는 정수여야 합니다.") from exc
-
-    ui_user = os.getenv("YOLO_UI_USER", "").strip()
-    ui_password = os.getenv("YOLO_UI_PASSWORD", "").strip()
-    if bool(ui_user) != bool(ui_password):
-        raise RuntimeError("YOLO_UI_USER와 YOLO_UI_PASSWORD는 함께 설정해야 합니다.")
-    ui_auth = (ui_user, ui_password) if ui_user and ui_password else None
-
-    def is_loopback_host(value: str) -> bool:
-        if value.lower() == "localhost":
-            return True
-        try:
-            return ip_address(value).is_loopback
-        except ValueError:
-            return False
-
-    allow_unauthenticated_ui = (
-        os.getenv("YOLO_ALLOW_UNAUTHENTICATED_UI", "0").strip() == "1"
-    )
-    requires_ui_auth = not is_loopback_host(host)
-    if requires_ui_auth and ui_auth is None and not allow_unauthenticated_ui:
-        raise RuntimeError(
-            "외부 주소에 여는 UI에는 YOLO_UI_USER/YOLO_UI_PASSWORD를 설정하세요. "
-            "역방향 프록시에서 인증하는 경우에만 "
-            "YOLO_ALLOW_UNAUTHENTICATED_UI=1을 명시하세요."
-        )
-
-    server_app = gr.mount_gradio_app(
-        api,
-        demo.queue(),
-        path="/",
-        server_name=host,
-        server_port=port,
-        auth=ui_auth,
+if __name__ == "__main__":
+    models.ensure_models()
+    demo.queue().launch(
         theme=gr.themes.Default(),
         css=_CSS,
         allowed_paths=[str(SAMPLES_DIR.resolve())],
     )
-    return server_app, host, port
-
-
-if __name__ == "__main__":
-    import uvicorn
-
-    models.ensure_models()
-    server_app, host, port = create_server_app()
-    uvicorn.run(server_app, host=host, port=port)
