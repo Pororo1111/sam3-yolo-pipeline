@@ -1,4 +1,4 @@
-"""Tab 6: 세션별 수동/LLM/ByteTrack 추적 영역 침입 감시."""
+"""Tab 7: 세션별 수동/LLM/ByteTrack 추적 영역 침입 감시."""
 
 from __future__ import annotations
 

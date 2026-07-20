@@ -1,4 +1,4 @@
-"""Tab 5 YOLO 추론 서비스."""
+"""Tab 6 YOLO 추론 서비스."""
 
 from __future__ import annotations
 

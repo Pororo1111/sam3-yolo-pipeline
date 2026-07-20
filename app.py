@@ -6,6 +6,7 @@ from pathlib import Path
 import gradio as gr
 from pipeline import (
     dataset,
+    dataset_importer,
     extractor,
     inference,
     labeler,
@@ -153,6 +154,129 @@ def refresh_base_model_dropdown():
     return gr.update(choices=_base_model_choices())
 
 
+def _dataset_choices(records):
+    return [
+        (
+            f"{record['name']} · train {record['train_images']:,} / "
+            f"val {record['val_images']:,} · {len(record['classes'])} classes",
+            record["yaml"],
+        )
+        for record in (records or [])
+    ]
+
+
+def _dataset_table(records):
+    return [
+        [
+            record["name"],
+            record.get("source", "외부 데이터셋"),
+            record["train_images"],
+            record["val_images"],
+            record["boxes"],
+            record["missing_labels"],
+            record["empty_labels"],
+            ", ".join(record["classes"]),
+            record["yaml"],
+        ]
+        for record in (records or [])
+    ]
+
+
+def _valid_dataset_selection(records, selected):
+    available = {
+        str(record["yaml"]).casefold(): record["yaml"] for record in (records or [])
+    }
+    result = []
+    seen = set()
+    for path in selected or []:
+        key = str(path).casefold()
+        if key in available and key not in seen:
+            result.append(available[key])
+            seen.add(key)
+    return result
+
+
+def _dataset_selection_text(records, selected):
+    valid, message = dataset_importer.selection_summary(records, selected)
+    return f"{'✅' if valid else '⚠️'} **학습 데이터셋:** {message}"
+
+
+def _dataset_ui_result(records, selected, message):
+    selected = _valid_dataset_selection(records, selected)
+    summary = _dataset_selection_text(records, selected)
+    return (
+        records,
+        gr.update(choices=_dataset_choices(records), value=selected),
+        _dataset_table(records),
+        message,
+        summary,
+        summary,
+    )
+
+
+def add_archive_datasets(archive_files, records, selected):
+    try:
+        records, added = dataset_importer.register_archives(archive_files, records)
+        selected = _valid_dataset_selection(records, selected)
+        selected_keys = {str(path).casefold() for path in selected}
+        for record in added:
+            key = str(record["yaml"]).casefold()
+            if key not in selected_keys:
+                selected.append(record["yaml"])
+                selected_keys.add(key)
+        message = (
+            f"✅ {len(added)}개 데이터셋을 압축 해제·검사하고 등록했습니다: "
+            + ", ".join(record["name"] for record in added)
+        )
+    except dataset_importer.DatasetImportError as exc:
+        message = f"❌ 등록 실패\n\n{exc}"
+    return _dataset_ui_result(records or [], selected or [], message)
+
+
+def refresh_datasets(records, selected):
+    records, errors = dataset_importer.refresh_registry(records)
+    message = f"✅ 등록된 데이터셋 {len(records)}개를 다시 검사했습니다."
+    if errors:
+        message += "\n\n⚠️ 사용할 수 없어 제외한 항목:\n" + "\n".join(
+            f"- {error}" for error in errors
+        )
+    return _dataset_ui_result(records, selected, message)
+
+
+def remove_external_datasets(records, selected):
+    selected_set = {str(path).casefold() for path in (selected or [])}
+    default_yaml = str(dataset_importer.DEFAULT_DATASET_YAML.resolve()).casefold()
+    removed = [
+        record
+        for record in (records or [])
+        if str(record["yaml"]).casefold() in selected_set
+        and str(record["yaml"]).casefold() != default_yaml
+    ]
+    records = [
+        record
+        for record in (records or [])
+        if record not in removed
+    ]
+    remaining_selection = [
+        path
+        for path in (selected or [])
+        if str(path).casefold() not in {
+            str(record["yaml"]).casefold() for record in removed
+        }
+    ]
+    message = (
+        f"✅ 외부 데이터셋 {len(removed)}개를 현재 목록에서 제거했습니다."
+        if removed
+        else "ℹ️ 제거할 외부 데이터셋이 선택되지 않았습니다."
+    )
+    return _dataset_ui_result(records, remaining_selection, message)
+
+
+def update_dataset_selection_status(records, selected):
+    summary = _dataset_selection_text(records, selected)
+    return summary, summary
+
+
 def run_label(prompts_str, conf):
     yield from labeler.label(prompts_str, float(conf))
 
@@ -182,8 +306,26 @@ _PRE_STYLE = (
 )
 
 
-def run_train(epochs, imgsz, batch, lr0, device, name, base_model):
-    for text in trainer.train(epochs, imgsz, batch, lr0, device, name, base_model):
+def run_train(
+    epochs,
+    imgsz,
+    batch,
+    lr0,
+    device,
+    name,
+    base_model,
+    dataset_yamls=None,
+):
+    for text in trainer.train(
+        epochs,
+        imgsz,
+        batch,
+        lr0,
+        device,
+        name,
+        base_model,
+        dataset_yamls,
+    ):
         escaped = _html.escape(text)
         yield f'<div style="{_WRAP_STYLE}"><pre style="{_PRE_STYLE}">{escaped}</pre></div>'
 
@@ -512,9 +654,96 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
                 outputs=[ds_class_state, ds_prompts, ds_last_label],
             )
 
+        # ── 외부 데이터셋 불러오기 ───────────────────────────
+        with gr.Tab("데이터셋 불러오기") as panel_dataset_import:
+            gr.Markdown("### 학습 데이터셋 불러오기")
+            gr.Markdown(
+                "기존 **데이터셋 검토 & 구성** 단계에서 만든 데이터셋과 외부 YOLO 탐지 "
+                "데이터셋을 함께 관리합니다. 클래스 구성이 다른 데이터셋도 원본 라벨을 "
+                "건드리지 않고 학습용 복사본에서 클래스 ID를 자동 통합합니다."
+            )
+
+            initial_dataset_records = dataset_importer.initial_registry()
+            initial_dataset_selection = [
+                record["yaml"] for record in initial_dataset_records
+            ]
+            dataset_registry_state = gr.State(value=initial_dataset_records)
+
+            dataset_archives = gr.File(
+                label="YOLO 데이터셋 ZIP 업로드 (여러 개 가능)",
+                file_count="multiple",
+                type="filepath",
+                file_types=[".zip"],
+                height=180,
+            )
+            archive_dataset_add = gr.Button(
+                "ZIP 압축 해제 후 등록",
+                variant="primary",
+            )
+
+            gr.Markdown(
+                "> ZIP은 각 데이터셋의 `data.yaml`, `train/images`, `train/labels`, "
+                "`valid/images`, `valid/labels` 같은 폴더 구조를 포함해야 합니다."
+            )
+
+            with gr.Row():
+                dataset_refresh_btn = gr.Button("등록 목록 다시 검사")
+                dataset_remove_btn = gr.Button(
+                    "선택한 외부 데이터셋을 목록에서 제거",
+                    variant="stop",
+                )
+
+            training_dataset_select = gr.CheckboxGroup(
+                choices=_dataset_choices(initial_dataset_records),
+                value=initial_dataset_selection,
+                label="학습에 사용할 데이터셋",
+                info="체크한 데이터셋을 한 번의 학습에 함께 적용합니다. "
+                     "클래스 구성이 다르면 통합 클래스 목록으로 라벨 ID를 자동 재매핑합니다.",
+            )
+            initial_dataset_summary = _dataset_selection_text(
+                initial_dataset_records,
+                initial_dataset_selection,
+            )
+            dataset_selection_status = gr.Markdown(initial_dataset_summary)
+            dataset_import_status = gr.Markdown(
+                "YOLO 데이터셋 ZIP을 하나 이상 업로드하세요."
+            )
+            dataset_registry_table = gr.Dataframe(
+                value=_dataset_table(initial_dataset_records),
+                headers=[
+                    "데이터셋",
+                    "소스",
+                    "Train",
+                    "Val",
+                    "BBox",
+                    "라벨 누락",
+                    "빈 라벨",
+                    "클래스",
+                    "YAML",
+                ],
+                datatype=[
+                    "str",
+                    "str",
+                    "number",
+                    "number",
+                    "number",
+                    "number",
+                    "number",
+                    "str",
+                    "str",
+                ],
+                interactive=False,
+                label="등록된 데이터셋 검사 결과",
+                wrap=True,
+            )
+
         # ── YOLO 학습 ────────────────────────────────────────
         with gr.Tab("YOLO 학습") as panel_train:
             gr.Markdown("### YOLO 모델 학습")
+            train_dataset_summary = gr.Markdown(initial_dataset_summary)
+            gr.Markdown(
+                "학습 데이터 변경은 **데이터셋 불러오기** 탭에서 선택하세요."
+            )
             gr.Markdown(
                 "> **파라미터 안내** — 아래 값은 ultralytics 기본값 기준이며 최적화된 값이 아닙니다. "
                 "데이터셋 크기·GPU 환경에 따라 조정하세요."
@@ -585,7 +814,7 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
             train_event = train_start_btn.click(
                 fn=run_train,
                 inputs=[epochs_slider, imgsz_slider, batch_slider, lr0_slider, device_radio,
-                        train_name, base_model_dd],
+                        train_name, base_model_dd, training_dataset_select],
                 outputs=train_log,
             )
             train_stop_btn.click(
@@ -1020,6 +1249,44 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
                 fn=refresh_webcam_dropdown,
                 outputs=zm_webcam_index,
             )
+
+    dataset_ui_outputs = [
+        dataset_registry_state,
+        training_dataset_select,
+        dataset_registry_table,
+        dataset_import_status,
+        dataset_selection_status,
+        train_dataset_summary,
+    ]
+    archive_dataset_add.click(
+        add_archive_datasets,
+        inputs=[
+            dataset_archives,
+            dataset_registry_state,
+            training_dataset_select,
+        ],
+        outputs=dataset_ui_outputs,
+    )
+    dataset_refresh_btn.click(
+        refresh_datasets,
+        inputs=[dataset_registry_state, training_dataset_select],
+        outputs=dataset_ui_outputs,
+    )
+    dataset_remove_btn.click(
+        remove_external_datasets,
+        inputs=[dataset_registry_state, training_dataset_select],
+        outputs=dataset_ui_outputs,
+    )
+    training_dataset_select.change(
+        update_dataset_selection_status,
+        inputs=[dataset_registry_state, training_dataset_select],
+        outputs=[dataset_selection_status, train_dataset_summary],
+    )
+    panel_dataset_import.select(
+        refresh_datasets,
+        inputs=[dataset_registry_state, training_dataset_select],
+        outputs=dataset_ui_outputs,
+    )
 
     # 데이터셋 단계 진입 시 클래스 목록 로드 (네이티브 탭 select 이벤트).
     # Tab 2 프롬프트가 직전 로드와 다르거나(재라벨링) 아직 로드된 적 없으면 새로

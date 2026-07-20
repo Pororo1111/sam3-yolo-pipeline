@@ -22,7 +22,6 @@ def _safe_name(name: str) -> str:
 
 
 _ROOT     = Path(__file__).resolve().parent.parent
-YAML_PATH = _ROOT / "dataset/dataset.yaml"
 _PROJECT  = _ROOT / "runs" / "detect"
 _MODEL_PT = _ROOT / "models/yolo26n.pt"
 
@@ -34,13 +33,25 @@ def stop():
 
 
 def train(epochs: int, imgsz: int, batch: int, lr0: float, device: str,
-          name: str = "train", base_model: str = ""):
+          name: str = "train", base_model: str = "",
+          dataset_yamls: list[str] | None = None):
     _stop_event.clear()
 
     run_name = _safe_name(name)
+    yield "선택한 데이터셋 검사 및 클래스 통합 준비 중...\n"
 
-    if not YAML_PATH.exists():
-        yield f"dataset.yaml 없음 — 먼저 Tab 3에서 데이터셋을 구성하세요.\n경로: {YAML_PATH.resolve()}"
+    try:
+        from pipeline.dataset_importer import (
+            DatasetImportError,
+            prepare_training_data,
+        )
+
+        training_yaml, dataset_description = prepare_training_data(dataset_yamls)
+    except DatasetImportError as exc:
+        yield f"데이터셋 검사 실패\n{exc}\n"
+        return
+    except Exception as exc:
+        yield f"데이터셋을 준비할 수 없습니다: {exc}\n"
         return
 
     try:
@@ -133,7 +144,8 @@ def train(epochs: int, imgsz: int, batch: int, lr0: float, device: str,
         f"학습 시작\n"
         f"  base={base_desc}  name={run_name}\n"
         f"  epochs={epochs}  imgsz={imgsz}  batch={batch}  lr0={lr0}  device={device}\n"
-        f"  data={YAML_PATH}\n"
+        f"  dataset={dataset_description}\n"
+        f"  data={training_yaml}\n"
         + "─" * 60 + "\n"
     )
     accumulated = header
@@ -146,7 +158,7 @@ def train(epochs: int, imgsz: int, batch: int, lr0: float, device: str,
     def _run():
         try:
             result_box[0] = model.train(
-                data=str(YAML_PATH),
+                data=str(training_yaml),
                 epochs=epochs,
                 imgsz=imgsz,
                 batch=batch,

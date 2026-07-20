@@ -19,11 +19,13 @@ YouTube URL · 웹캠 · 비디오 파일 · 로컬 이미지 폴더를 소스�
     ↓
 [3] 데이터셋 검토 & 구성
     ↓
-[4] YOLO 학습
+[4] 외부 데이터셋 불러오기
     ↓
-[5] 추론
+[5] YOLO 학습
     ↓
-[6] 침입 감지 (로컬 LLM 영역 설정 + YOLO 실시간 감시)
+[6] 추론
+    ↓
+[7] 침입 감지 (로컬 LLM 영역 설정 + YOLO 실시간 감시)
 ```
 
 ---
@@ -65,9 +67,10 @@ yolo-webui/
 │   ├── extractor.py        ← Tab 1: 프레임 추출
 │   ├── labeler.py          ← Tab 2: SAM3 오토라벨링
 │   ├── dataset.py          ← Tab 3: 데이터셋 검토/구성
-│   ├── trainer.py          ← Tab 4: YOLO 학습
-│   ├── inference.py        ← Tab 5: 추론
-│   └── zone_monitor.py     ← Tab 6: 침입 감지
+│   ├── dataset_importer.py ← Tab 4: 외부 데이터셋 등록/검증/결합
+│   ├── trainer.py          ← Tab 5: YOLO 학습
+│   ├── inference.py        ← Tab 6: 추론
+│   └── zone_monitor.py     ← Tab 7: 침입 감지
 ├── dataset/
 │   ├── raw_frames/         ← 추출된 원본 프레임
 │   ├── images/train|val/   ← 분할된 학습/검증 이미지
@@ -168,10 +171,23 @@ cls_ids = results[0].boxes.cls.cpu().numpy().astype(int)
 - 분할 전 `images/train|val`, `labels/train|val`을 `shutil.rmtree`로 정리 → 재실행 시 데이터 누적 및 같은 프레임이 train/val 양쪽에 섞이는 누수 방지
 - `dataset/dataset.yaml` 자동 생성 (클래스명은 최종 클래스 이름에서 자동 설정)
 
-### Tab 4 — YOLO 학습
+### Tab 4 — 외부 데이터셋 불러오기
+**파일**: `pipeline/dataset_importer.py`
+
+- `dataset/imported/` 같은 고정 폴더에는 의존하지 않는다.
+- 외부 YOLO 데이터셋은 폴더 구조 유실을 막기 위해 ZIP 업로드만 사용하며 여러 ZIP을 한 번에 등록할 수 있다. ZIP은 경로 탈출, 파일 수, 압축 해제 크기를 검사한 뒤 `dataset/external/`에 안전하게 푼다.
+- 등록 시 `data.yaml`/`dataset.yaml`의 train·val 경로, names/nc, 이미지 존재 여부, 라벨 열 수, 클래스 ID, 정규화 bbox 좌표를 검사한다. 라벨 없음/빈 라벨은 배경 이미지로 집계하고 오류로 보지 않는다.
+- 등록 목록의 체크박스로 여러 데이터셋을 한 학습에 적용한다. 클래스 구성이 같으면 절대 이미지 경로 목록을 가진 `dataset/.combined/combined-<hash>.yaml`로 직접 결합한다.
+- 클래스 이름/ID 순서가 다르면 선택 순서 기준의 통합 클래스 목록을 만들고 `dataset/.combined/staged-<hash>/`에 학습용 데이터셋을 구성한다. 원본 라벨은 바꾸지 않고 staged 라벨의 class ID만 재작성한다.
+- staged 이미지는 hardlink → copy 순서로 준비해 불필요한 대용량 복사를 줄이고, Ultralytics의 라벨 캐시도 원본이 아닌 staged 폴더에 생성되게 한다.
+- staging digest에는 스키마 버전, 원본 YAML, 클래스 매핑, 이미지 stat, 라벨 content hash를 포함한다. 완료 marker와 자체 검증 통계가 맞는 캐시만 재사용한다.
+- 학습 시작 직전에 모든 선택 데이터셋을 다시 검사해 외부 폴더 이동·삭제·변경을 감지한다.
+
+### Tab 5 — YOLO 학습
 **파일**: `pipeline/trainer.py`
 
 - 모델: `yolo26n.pt` (기본 베이스) — **베이스 모델 드롭다운으로 이어학습(파인튜닝) 지원**: 비우면(값 `""`) 사전학습 `yolo26n.pt`로 처음부터, 학습된 모델(`best.pt`)을 고르면 그 가중치 위에 `YOLO(base_path)`로 로딩 후 새 학습. 드롭다운 첫 항목이 "처음부터"이고 이후는 `models.list_trained_models()` 재사용(추론 탭과 동일). 결과는 항상 `name` 입력칸이 정한 새 폴더에 저장돼 베이스는 보존
+- 학습 데이터는 데이터셋 불러오기 탭의 선택 목록을 사용한다. 단일 선택은 원본 YAML을, 다중 선택은 호환성 검사 후 생성한 조합 YAML을 `model.train(data=...)`에 전달한다.
 - stdout 가로채기로 학습 로그 실시간 스트리밍
 - ANSI 이스케이프 코드 + `\r` tqdm 패턴 정규식으로 제거 후 표시
 - `workers=0` 고정 — Windows DataLoader 멀티프로세싱 spawn 오류 방지
@@ -192,7 +208,7 @@ cls_ids = results[0].boxes.cls.cpu().numpy().astype(int)
 
 학습 후 `runs/detect/train/results.csv` 에서 loss 곡선 확인 권장.
 
-### Tab 5 — 추론
+### Tab 6 — 추론
 **파일**: `pipeline/inference.py`
 
 - 소스: Tab 1과 동일 (YouTube URL / 웹캠 / 비디오 파일 / 이미지 폴더), 영상은 `cv2.VideoCapture` 직접 사용
@@ -207,7 +223,7 @@ cls_ids = results[0].boxes.cls.cpu().numpy().astype(int)
 - 드롭다운이 비어(`value=None`) `predict`에 전달돼도 `(model_path or "").strip()`으로 방어 → `_find_best_pt()` 폴백, 그래도 없으면 안내 메시지
 - `gr.Image(streaming=True)` 사용
 
-### Tab 6 — 침입 감지
+### Tab 7 — 침입 감지
 **파일**: `pipeline/zone_monitor.py`
 
 - 소스: Tab 1/5와 동일 (YouTube URL / 웹캠 / 비디오 파일 / 이미지 폴더)
@@ -215,7 +231,7 @@ cls_ids = results[0].boxes.cls.cpu().numpy().astype(int)
 - 영상 소스 정규화와 이미지 로딩은 `pipeline/media.py`, bbox 표시와 RGB/크기 변환은 `pipeline/vision.py`를 프레임 추출·추론 탭과 공유한다.
 - 폴더 입력은 `gr.File(file_count="directory")` 업로드. 업로드가 비어 있으면 Tab 1 업로드 파일 자동 상속
 - zone 오버레이 로직은 `_render_zones()` 헬퍼로 추출 — 비디오/폴더 루프 공유
-- **YOLO 모델 선택은 학습된 모델 드롭다운**(`gr.Dropdown`, `models.list_trained_models()` 공유) — Tab 5 추론과 동일하게 생성 날짜 표시 + 최신순 + 새로고침 버튼/탭 진입 자동 갱신(`panel_zone.select`)
+- **YOLO 모델 선택은 학습된 모델 드롭다운**(`gr.Dropdown`, `models.list_trained_models()` 공유) — Tab 6 추론과 동일하게 생성 날짜 표시 + 최신순 + 새로고침 버튼/탭 진입 자동 갱신(`panel_zone.select`)
 - **영역 설정 흐름**:
   1. 스트림 시작 → 마지막 프레임을 `_last_frame`에 계속 저장
   2. 사용자가 감시 영역을 한국어로 입력
