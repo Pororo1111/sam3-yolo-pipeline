@@ -75,6 +75,97 @@ class ZoneMonitorTests(unittest.TestCase):
         with self.runtime.lock:
             self.assertAlmostEqual(self.runtime.zones[0]["anchors"][0]["point"][1], 0.82)
 
+    def test_tracked_mode_auto_selects_cone_tracks_in_polygon_order(self):
+        with self.runtime.lock:
+            self.runtime.edit_tracks = [
+                zone_monitor.TrackObservation(1, 0, 0.9, "Safety Cone", (0.05, 0.6, 0.15, 0.8)),
+                zone_monitor.TrackObservation(2, 0, 0.9, "Safety Cone", (0.45, 0.1, 0.55, 0.3)),
+                zone_monitor.TrackObservation(3, 0, 0.9, "Safety Cone", (0.85, 0.6, 0.95, 0.8)),
+                zone_monitor.TrackObservation(4, 1, 0.99, "person", (0.4, 0.4, 0.6, 0.9)),
+            ]
+
+        _, status = zone_monitor.auto_select_tracked_anchors(
+            self.session_id,
+            zone_monitor.MODE_TRACKED,
+        )
+
+        self.assertIn("3개를 자동 선택", status)
+        with self.runtime.lock:
+            self.assertEqual(
+                {anchor["track_id"] for anchor in self.runtime.draft_anchors},
+                {1, 2, 3},
+            )
+            points = [tuple(anchor["point"]) for anchor in self.runtime.draft_anchors]
+        self.assertGreater(zone_monitor._polygon_area(points), 0.0001)
+
+    def test_auto_selection_ignores_non_safety_cone_class(self):
+        with self.runtime.lock:
+            self.runtime.edit_tracks = [
+                zone_monitor.TrackObservation(
+                    track_id, 7, 0.8, "safety marker", xyxy
+                )
+                for track_id, xyxy in (
+                    (10, (0.0, 0.6, 0.2, 0.8)),
+                    (11, (0.4, 0.1, 0.6, 0.3)),
+                    (12, (0.8, 0.6, 1.0, 0.8)),
+                )
+            ]
+
+        zone_monitor.auto_select_tracked_anchors(
+            self.session_id,
+            zone_monitor.MODE_TRACKED,
+        )
+        with self.runtime.lock:
+            self.assertEqual(self.runtime.draft_anchors, [])
+
+    def test_stream_update_creates_and_refreshes_safety_cone_zone(self):
+        run_id, stop_event = zone_monitor._begin_stream(self.runtime)
+        observations = [
+            zone_monitor.TrackObservation(1, 0, 0.9, "Safety Cone", (0.0, 0.6, 0.2, 0.8)),
+            zone_monitor.TrackObservation(2, 0, 0.9, "Safety Cone", (0.4, 0.1, 0.6, 0.3)),
+            zone_monitor.TrackObservation(3, 0, 0.9, "Safety Cone", (0.8, 0.6, 1.0, 0.8)),
+        ]
+
+        updated = zone_monitor._update_tracking_and_latest(
+            self.runtime,
+            run_id,
+            stop_event,
+            np.zeros((100, 100, 3), dtype=np.uint8),
+            observations,
+        )
+
+        self.assertTrue(updated)
+        with self.runtime.lock:
+            self.assertEqual(len(self.runtime.zones), 1)
+            self.assertEqual(self.runtime.zones[0]["label"], "Safety Cone zone")
+            first_zone_id = self.runtime.zones[0]["id"]
+
+        moved = [
+            zone_monitor.TrackObservation(
+                item.track_id,
+                item.class_id,
+                item.confidence,
+                item.class_name,
+                tuple(value + 0.01 for value in item.xyxy),
+            )
+            for item in observations
+        ]
+        zone_monitor._update_tracking_and_latest(
+            self.runtime,
+            run_id,
+            stop_event,
+            np.zeros((100, 100, 3), dtype=np.uint8),
+            moved,
+        )
+        with self.runtime.lock:
+            self.assertEqual(len(self.runtime.zones), 1)
+            self.assertEqual(self.runtime.zones[0]["id"], first_zone_id)
+            moved_by_id = {
+                anchor["track_id"]: anchor["point"]
+                for anchor in self.runtime.zones[0]["anchors"]
+            }
+            self.assertAlmostEqual(moved_by_id[1][0], 0.11)
+
     def test_track_id_reuse_by_another_class_marks_anchor_missing(self):
         anchor = {
             "track_id": 1,

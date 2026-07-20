@@ -406,7 +406,108 @@ def _render_editor_locked(runtime: ZoneRuntime) -> np.ndarray | None:
     return vision.to_rgb(frame)
 
 
-def capture_editor_frame(session_id: str):
+def _auto_anchor_candidates(
+    observations: list[TrackObservation],
+) -> tuple[list[dict], str | None]:
+    """같은 클래스 Track 중 라바콘 후보를 골라 볼록 다각형 순서로 반환한다."""
+
+    grouped: dict[int, list[TrackObservation]] = {}
+    for observation in observations:
+        if observation.track_id >= 0:
+            grouped.setdefault(observation.class_id, []).append(observation)
+
+    eligible = [
+        items
+        for items in grouped.values()
+        if len(items) >= 3
+        and "safety cone"
+        in items[0].class_name.casefold().replace("_", " ").replace("-", " ")
+    ]
+    if not eligible:
+        return [], None
+
+    def group_score(items: list[TrackObservation]):
+        mean_confidence = sum(item.confidence for item in items) / len(items)
+        return (len(items), mean_confidence)
+
+    selected = max(eligible, key=group_score)
+    points = np.asarray([item.anchor for item in selected], dtype=np.float32)
+    hull_indices = cv2.convexHull(points, returnPoints=False)
+    if hull_indices is None or len(hull_indices) < 3:
+        return [], selected[0].class_name
+
+    anchors = []
+    for index in hull_indices.reshape(-1):
+        observation = selected[int(index)]
+        anchors.append(
+            {
+                "track_id": observation.track_id,
+                "class_id": observation.class_id,
+                "class_name": observation.class_name,
+                "point": list(observation.anchor),
+                "missing": 0,
+            }
+        )
+    return anchors, selected[0].class_name
+
+
+def _ensure_auto_cone_zone_locked(
+    runtime: ZoneRuntime,
+    observations: list[TrackObservation],
+) -> None:
+    """Safety Cone Track 3개 이상을 실시간 자동 추적 영역으로 유지한다."""
+
+    anchors, _ = _auto_anchor_candidates(observations)
+    if len(anchors) < 3:
+        return
+
+    tracked_zone = next(
+        (zone for zone in runtime.zones if zone.get("mode") == MODE_TRACKED),
+        None,
+    )
+    if tracked_zone is None:
+        runtime.zones.append(
+            {
+                "id": uuid.uuid4().hex,
+                "label": "Safety Cone zone",
+                "mode": MODE_TRACKED,
+                "anchors": anchors,
+            }
+        )
+    else:
+        tracked_zone["anchors"] = anchors
+
+
+def auto_select_tracked_anchors(session_id: str, mode: str):
+    """추적 모드 진입 시 현재 편집 프레임의 라바콘 경계를 자동 선택한다."""
+
+    runtime = _runtime(session_id)
+    with runtime.lock:
+        if mode != MODE_TRACKED:
+            runtime.draft_anchors.clear()
+            return _render_editor_locked(runtime), "수동 다각형 모드입니다."
+        if runtime.edit_frame is None:
+            return None, "먼저 현재 프레임 가져오기를 눌러 편집 프레임을 고정하세요."
+
+        runtime.draft_points.clear()
+        runtime.draft_anchors, class_name = _auto_anchor_candidates(
+            runtime.edit_tracks
+        )
+        count = len(runtime.draft_anchors)
+        image = _render_editor_locked(runtime)
+        if count < 3:
+            runtime.draft_anchors.clear()
+            return image, (
+                "동일 클래스의 Track ID 객체가 3개 이상 필요합니다. "
+                "라바콘이 모두 검출된 프레임에서 다시 시도하세요."
+            )
+        return image, (
+            f"{class_name} 라바콘 Track {count}개를 자동 선택했습니다. "
+            "경계를 확인한 뒤 다각형 완료를 누르세요."
+        )
+
+
+def capture_editor_frame(session_id: str, mode: str = MODE_MANUAL):
     """현재 영상과 Track 목록을 고정해 안전한 클릭 편집 프레임을 만든다."""
 
     runtime = _runtime(session_id)
@@ -417,8 +518,18 @@ def capture_editor_frame(session_id: str):
         runtime.edit_tracks = list(runtime.last_tracks)
         runtime.draft_points.clear()
         runtime.draft_anchors.clear()
-        image = _render_editor_locked(runtime)
         track_count = sum(1 for item in runtime.edit_tracks if item.track_id >= 0)
+        if mode == MODE_TRACKED:
+            runtime.draft_anchors, class_name = _auto_anchor_candidates(
+                runtime.edit_tracks
+            )
+            image = _render_editor_locked(runtime)
+            if len(runtime.draft_anchors) >= 3:
+                return image, (
+                    f"{class_name} 라바콘 Track {len(runtime.draft_anchors)}개를 "
+                    "자동 선택했습니다. 경계를 확인한 뒤 다각형 완료를 누르세요."
+                )
+        image = _render_editor_locked(runtime)
     return image, (
         f"편집 프레임을 고정했습니다. Track ID가 있는 객체 {track_count}개 · "
         "모드를 고르고 꼭짓점을 순서대로 클릭하세요."
@@ -596,7 +707,12 @@ def reset(session_id: str):
         runtime.last_tracks.clear()
         runtime.edit_frame = None
         runtime.edit_tracks.clear()
-    return None, None, "스트림 중지 / 초기화", "모든 감시 영역을 초기화했습니다."
+    return (
+        None,
+        None,
+        "스트림 중지 / 자동 라바콘 영역 초기화",
+        "수동 영역 편집을 초기화했습니다.",
+    )
 
 
 def prepare_stream(session_id: str):
@@ -613,7 +729,12 @@ def prepare_stream(session_id: str):
         runtime.last_tracks.clear()
         runtime.edit_frame = None
         runtime.edit_tracks.clear()
-    return None, None, "새 ByteTrack 스트림을 준비합니다.", "영역을 초기화했습니다."
+    return (
+        None,
+        None,
+        "Safety Cone 자동 추적 스트림을 준비합니다.",
+        "수동 영역 편집을 초기화했습니다.",
+    )
 
 
 def _begin_stream(runtime: ZoneRuntime) -> tuple[str, threading.Event]:
@@ -669,6 +790,7 @@ def _update_tracking_and_latest(
         ):
             return False
         _update_tracked_zones_locked(runtime, observations)
+        _ensure_auto_cone_zone_locked(runtime, observations)
         runtime.last_frame = frame_bgr.copy()
         runtime.last_tracks = list(observations)
         return True
@@ -757,7 +879,7 @@ def stream(
                 if not ok:
                     break
 
-                effective_interval = 1 if _tracking_active(runtime) else interval
+                effective_interval = 1
                 if frame_index % effective_interval == 0:
                     boxes = _track_frame(model, frame_bgr, float(conf))
                     observations = _observations_from_boxes(
@@ -853,7 +975,7 @@ def _stream_folder(
             frame_bgr = media.read_image(path)
             if frame_bgr is None:
                 continue
-            effective_interval = 1 if _tracking_active(runtime) else infer_every
+            effective_interval = 1
             if frame_index % effective_interval == 0:
                 boxes = _track_frame(model, frame_bgr, conf)
                 observations = _observations_from_boxes(boxes, names, frame_bgr.shape)

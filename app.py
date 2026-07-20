@@ -976,7 +976,7 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
 
         # ── 침입 감지 ────────────────────────────────────────
         with gr.Tab("침입 감지") as panel_zone:
-            gr.Markdown("### 수동·추적 영역 실시간 침입 감지")
+            gr.Markdown("### Safety Cone 자동 추적 침입 감지")
             zm_session_id = gr.State(
                 value=zone_monitor.create_session,
                 time_to_live=3600,
@@ -995,15 +995,11 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
                 )
                 zm_model_refresh = gr.Button("모델 목록 새로고침", scale=1)
 
-            with gr.Row():
-                zm_conf = gr.Slider(
-                    minimum=0.05, maximum=0.95, value=0.15, step=0.05,
-                    label="신뢰도 임계값 (conf)",
-                )
-                zm_skip = gr.Slider(
-                    minimum=1, maximum=10, value=3, step=1,
-                    label="추론 간격 (N프레임마다 1회)",
-                )
+            zm_conf = gr.Slider(
+                minimum=0.05, maximum=0.95, value=0.15, step=0.05,
+                label="신뢰도 임계값 (conf)",
+            )
+            zm_skip = gr.State(1)
 
             with gr.Row():
                 zm_source_type = gr.Radio(
@@ -1095,40 +1091,55 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
                 zm_start_btn = gr.Button("스트림 시작", variant="primary")
                 zm_stop_btn  = gr.Button("중지 / 초기화", variant="stop")
 
-            zm_preview = gr.Image(label="실시간 영상", type="numpy", streaming=True)
-            zm_stream_status = gr.Textbox(label="상태", interactive=False)
-
-            gr.Markdown("#### 마우스 다각형 / 라바콘 추적 영역")
-            gr.Markdown(
-                "스트림을 시작한 뒤 **현재 프레임 가져오기**를 누르세요. "
-                "수동 모드는 빈 화면의 꼭짓점을, 라바콘 추적 모드는 검출 bbox를 "
-                "순서대로 3개 이상 클릭하고 완료합니다. 추적 모드는 `추론 간격 1`을 권장합니다."
+            zm_preview = gr.Image(
+                label="Safety Cone 자동 추적 실시간 영상",
+                type="numpy",
+                streaming=True,
             )
+            zm_stream_status = gr.Textbox(label="상태", interactive=False)
+            gr.Markdown(
+                "`스트림 시작`을 누르면 `Safety Cone`을 매 프레임 추적합니다. "
+                "라바콘 Track이 3개 이상 잡히면 바닥 중심점의 외곽선을 연결해 "
+                "침입 감지 영역을 자동 생성하고 계속 갱신합니다."
+            )
+            gr.Markdown(
+                "**표시 색상 안내**\n\n"
+                "- **초록색 영역**: 영역 안에 침입 객체가 없습니다.\n"
+                "- **빨간색 영역·반투명 채우기**: 영역 안에 침입 객체가 있습니다. "
+                "영역 이름의 `(N)`은 침입 객체 수입니다.\n"
+                "- **주황색 영역·앵커**: 추적하던 Safety Cone의 Track ID가 현재 프레임에서 "
+                "하나 이상 유실되어 마지막 위치를 유지 중입니다.\n"
+                "- **하늘색 점·선**: 정상 추적 중인 Safety Cone 앵커와 자동 감시 경계입니다."
+            )
+
+            gr.Markdown("#### 수동 다각형 영역 추가")
+            gr.Markdown(
+                "스트림 실행 중 **현재 프레임 가져오기**를 누른 뒤, "
+                "영역 꼭짓점을 순서대로 3개 이상 클릭하고 **수동 다각형 완료**를 누르세요."
+            )
+            zm_manual_mode = gr.State(zone_monitor.MODE_MANUAL)
             with gr.Row():
-                zm_snapshot_btn = gr.Button("현재 프레임 가져오기", variant="secondary")
-                zm_zone_mode = gr.Radio(
-                    choices=[
-                        ("수동 다각형", zone_monitor.MODE_MANUAL),
-                        ("라바콘 추적 (ByteTrack)", zone_monitor.MODE_TRACKED),
-                    ],
-                    value=zone_monitor.MODE_MANUAL,
-                    label="클릭 모드",
+                zm_snapshot_btn = gr.Button(
+                    "현재 프레임 가져오기",
+                    variant="secondary",
                 )
                 zm_zone_label = gr.Textbox(
-                    label="영역 이름",
-                    placeholder="예: Entrance / Cone zone",
+                    label="수동 영역 이름",
+                    placeholder="예: Entrance",
                 )
             zm_zone_editor = gr.Image(
-                label="영역 편집 (고정 프레임을 클릭하세요)",
+                label="수동 영역 편집 (고정 프레임의 꼭짓점을 클릭하세요)",
                 type="numpy",
                 interactive=False,
             )
             with gr.Row():
                 zm_undo_btn = gr.Button("마지막 점 취소")
                 zm_clear_draft_btn = gr.Button("작성 중인 점 지우기")
-                zm_finish_btn = gr.Button("다각형 완료", variant="primary")
-                zm_clear_zones_btn = gr.Button("모든 영역 지우기", variant="stop")
-            zm_zone_status = gr.Textbox(label="영역 편집 상태", interactive=False)
+                zm_finish_btn = gr.Button("수동 다각형 완료", variant="primary")
+            zm_zone_status = gr.Textbox(
+                label="수동 영역 편집 상태",
+                interactive=False,
+            )
 
             zm_youtube_sample_btn.click(
                 fn=load_sample_youtube_url,
@@ -1146,7 +1157,12 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
             zm_prepare_event = zm_start_btn.click(
                 fn=zone_monitor.prepare_stream,
                 inputs=zm_session_id,
-                outputs=[zm_preview, zm_zone_editor, zm_stream_status, zm_zone_status],
+                outputs=[
+                    zm_preview,
+                    zm_zone_editor,
+                    zm_stream_status,
+                    zm_zone_status,
+                ],
                 show_progress="hidden",
             )
             zm_stream_event = zm_prepare_event.then(
@@ -1159,26 +1175,31 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
             zm_stop_btn.click(
                 fn=zone_monitor.reset,
                 inputs=zm_session_id,
-                outputs=[zm_preview, zm_zone_editor, zm_stream_status, zm_zone_status],
+                outputs=[
+                    zm_preview,
+                    zm_zone_editor,
+                    zm_stream_status,
+                    zm_zone_status,
+                ],
                 cancels=[zm_stream_event],
             )
             zm_snapshot_btn.click(
                 fn=zone_monitor.capture_editor_frame,
-                inputs=zm_session_id,
+                inputs=[zm_session_id, zm_manual_mode],
                 outputs=[zm_zone_editor, zm_zone_status],
                 concurrency_id="zone_editor",
                 concurrency_limit=1,
             )
             zm_zone_editor.select(
                 fn=on_zone_editor_select,
-                inputs=[zm_session_id, zm_zone_mode],
+                inputs=[zm_session_id, zm_manual_mode],
                 outputs=[zm_zone_editor, zm_zone_status],
                 concurrency_id="zone_editor",
                 concurrency_limit=1,
             )
             zm_undo_btn.click(
                 fn=zone_monitor.undo_draft_point,
-                inputs=[zm_session_id, zm_zone_mode],
+                inputs=[zm_session_id, zm_manual_mode],
                 outputs=[zm_zone_editor, zm_zone_status],
                 concurrency_id="zone_editor",
                 concurrency_limit=1,
@@ -1192,14 +1213,7 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
             )
             zm_finish_btn.click(
                 fn=zone_monitor.finish_draft,
-                inputs=[zm_session_id, zm_zone_mode, zm_zone_label],
-                outputs=[zm_zone_editor, zm_zone_status],
-                concurrency_id="zone_editor",
-                concurrency_limit=1,
-            )
-            zm_clear_zones_btn.click(
-                fn=zone_monitor.clear_zones,
-                inputs=zm_session_id,
+                inputs=[zm_session_id, zm_manual_mode, zm_zone_label],
                 outputs=[zm_zone_editor, zm_zone_status],
                 concurrency_id="zone_editor",
                 concurrency_limit=1,
