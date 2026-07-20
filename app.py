@@ -1,7 +1,5 @@
 import html as _html
-import asyncio
 import os
-from contextlib import asynccontextmanager
 from ipaddress import ip_address
 from pathlib import Path
 
@@ -1045,67 +1043,12 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
     panel_train.select(refresh_base_model_dropdown, outputs=base_model_dd)
 
 
-if __name__ == "__main__":
-    role = os.getenv("YOLO_NODE_ROLE", "standalone").strip().lower()
-    if role not in {"standalone", "registry", "edge"}:
-        raise RuntimeError(
-            "YOLO_NODE_ROLE은 standalone, registry, edge 중 하나여야 합니다."
-        )
-    # edge는 중앙의 학습 완료 모델을 먼저 받으므로 불필요한 베이스 모델 다운로드를 생략한다.
-    if role != "edge":
-        models.ensure_models()
+def create_server_app():
+    """Gradio UI를 호스트·포트·인증 설정과 함께 제공한다."""
 
     from fastapi import FastAPI
-    import uvicorn
 
-    from pipeline import model_registry, model_sync
-
-    registry = model_registry.registry_from_environment() if role == "registry" else None
-    sync_worker = model_sync.worker_from_environment() if role == "edge" else None
-
-    @asynccontextmanager
-    async def lifespan(_app):
-        if registry is not None:
-            published = await asyncio.to_thread(registry.publish_latest_existing_if_empty)
-            if published is not None:
-                print(
-                    "[model-registry] 기존 최신 모델 게시 완료: "
-                    f"{published.run_name} ({published.release_id[:8]})"
-                )
-        if sync_worker is not None:
-            sync_worker.start()
-            print("[model-sync] 중앙 모델 자동 동기화를 시작했습니다.")
-        try:
-            yield
-        finally:
-            if sync_worker is not None:
-                stopped = await asyncio.to_thread(sync_worker.stop)
-                if not stopped:
-                    print("[model-sync] 종료 시간 안에 동기화 작업이 끝나지 않았습니다.")
-
-    api = FastAPI(title="YOLO Pipeline", lifespan=lifespan)
-    if registry is not None:
-        read_token = os.getenv("YOLO_REGISTRY_READ_TOKEN", "").strip()
-        if not read_token:
-            raise RuntimeError(
-                "registry 역할에는 YOLO_REGISTRY_READ_TOKEN이 필요합니다."
-            )
-        publish_token = os.getenv("YOLO_REGISTRY_PUBLISH_TOKEN", "").strip()
-        max_model_bytes = model_registry.max_model_bytes_from_environment()
-        if publish_token:
-            api.add_middleware(
-                model_registry.RegistryUploadGuardMiddleware,
-                publish_token=publish_token,
-                max_model_bytes=max_model_bytes,
-            )
-        api.include_router(
-            model_registry.create_router(
-                registry,
-                read_token=read_token,
-                publish_token=publish_token,
-                max_model_bytes=max_model_bytes,
-            )
-        )
+    api = FastAPI(title="YOLO Pipeline")
 
     host = os.getenv(
         "YOLO_APP_HOST",
@@ -1138,11 +1081,10 @@ if __name__ == "__main__":
     allow_unauthenticated_ui = (
         os.getenv("YOLO_ALLOW_UNAUTHENTICATED_UI", "0").strip() == "1"
     )
-    requires_ui_auth = role == "registry" or not is_loopback_host(host)
+    requires_ui_auth = not is_loopback_host(host)
     if requires_ui_auth and ui_auth is None and not allow_unauthenticated_ui:
         raise RuntimeError(
-            "registry 역할 또는 외부 주소에 여는 UI에는 "
-            "YOLO_UI_USER/YOLO_UI_PASSWORD를 설정하세요. "
+            "외부 주소에 여는 UI에는 YOLO_UI_USER/YOLO_UI_PASSWORD를 설정하세요. "
             "역방향 프록시에서 인증하는 경우에만 "
             "YOLO_ALLOW_UNAUTHENTICATED_UI=1을 명시하세요."
         )
@@ -1158,4 +1100,12 @@ if __name__ == "__main__":
         css=_CSS,
         allowed_paths=[str(SAMPLES_DIR.resolve())],
     )
+    return server_app, host, port
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    models.ensure_models()
+    server_app, host, port = create_server_app()
     uvicorn.run(server_app, host=host, port=port)

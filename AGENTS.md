@@ -245,20 +245,6 @@ cls_ids = results[0].boxes.cls.cpu().numpy().astype(int)
 
 ---
 
-## 중앙 모델 레지스트리 / Raspberry Pi 동기화
-
-- `YOLO_NODE_ROLE=registry`: 정상 학습 종료 모델을 SHA-256 content-addressed blob으로
-  게시하고 `/model-registry/v1` API를 제공한다. 읽기/업로드는 각각 Bearer 토큰으로
-  보호하며 외부 bind 시 Gradio UI 인증을 요구한다.
-- `YOLO_NODE_ROLE=edge`: 시작 즉시 및 설정 주기마다 최신 릴리스를 확인한다. 임시
-  폴더에 스트리밍 다운로드한 뒤 크기와 SHA-256을 검증하고
-  `runs/detect/remote-<run>-<release>/weights/best.pt`로 원자 이동한다.
-- edge는 매 확인 시 설치 파일 SHA-256을 다시 검증한다. 손상·삭제된 파일은 같은
-  릴리스를 다시 내려받으며, 진행 중인 추론 모델은 바꾸지 않고 다음 실행부터 새
-  모델을 사용한다.
-
----
-
 ## SAM3 주의사항
 
 - `SAM3SemanticPredictor` — 텍스트 프롬프트 전용
