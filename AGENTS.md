@@ -25,7 +25,7 @@ YouTube URL · 웹캠 · 비디오 파일 · 로컬 이미지 폴더를 소스�
     ↓
 [6] 추론
     ↓
-[7] 침입 감지 (로컬 LLM 영역 설정 + YOLO 실시간 감시)
+[7] 침입 감지 (수동/추적 영역 + YOLO 실시간 감시)
 ```
 
 ---
@@ -49,8 +49,7 @@ YouTube URL · 웹캠 · 비디오 파일 · 로컬 이미지 폴더를 소스�
 | 영상 처리 | `opencv-python` |
 | SAM3 오토라벨링 | `ultralytics` — `SAM3SemanticPredictor` |
 | YOLO 학습/추론 | `ultralytics` — `YOLO("yolo26n.pt")` |
-| 로컬 LLM (VLM) | `ollama` REST API — `gemma4:e4b` (영역 설정) |
-| HTTP 클라이언트 | `requests` — Ollama API 호출 |
+| HTTP 클라이언트 | `requests` — edge 모델 동기화 |
 
 ---
 
@@ -226,18 +225,17 @@ cls_ids = results[0].boxes.cls.cpu().numpy().astype(int)
 ### Tab 7 — 침입 감지
 **파일**: `pipeline/zone_monitor.py`
 
-- 소스: Tab 1/5와 동일 (YouTube URL / 웹캠 / 비디오 파일 / 이미지 폴더)
-- 이미지 폴더 모드(`_stream_folder`): 업로드 이미지 순회하며 `_last_frame` 갱신(→ 영역 설정 가능) + 침입 판별, 중지 전까지 반복
+- 소스: Tab 1/6과 동일 (YouTube URL / 웹캠 / 비디오 파일 / 이미지 폴더)
+- 이미지 폴더 모드(`_stream_folder`): 업로드 이미지 순회하며 `_last_frame` 갱신(→ 현재 프레임 고정 가능) + 침입 판별, 중지 전까지 반복
 - 영상 소스 정규화와 이미지 로딩은 `pipeline/media.py`, bbox 표시와 RGB/크기 변환은 `pipeline/vision.py`를 프레임 추출·추론 탭과 공유한다.
 - 폴더 입력은 `gr.File(file_count="directory")` 업로드. 업로드가 비어 있으면 Tab 1 업로드 파일 자동 상속
 - zone 오버레이 로직은 `_render_zones()` 헬퍼로 추출 — 비디오/폴더 루프 공유
 - **YOLO 모델 선택은 학습된 모델 드롭다운**(`gr.Dropdown`, `models.list_trained_models()` 공유) — Tab 6 추론과 동일하게 생성 날짜 표시 + 최신순 + 새로고침 버튼/탭 진입 자동 갱신(`panel_zone.select`)
 - **영역 설정 흐름**:
   1. 스트림 시작 → 마지막 프레임을 `_last_frame`에 계속 저장
-  2. 사용자가 감시 영역을 한국어로 입력
-  3. "영역 설정" 클릭 → 현재 프레임 + 프롬프트를 Ollama(`gemma4:e4b`)에 전송
-  4. LLM이 정규화 좌표 JSON 반환 → `_zones`에 저장
-  5. LLM 응답 원문은 로그 창에 표시
+  2. 「현재 프레임 가져오기」로 영상과 Track 목록 고정
+  3. 수동 모드는 이미지의 꼭짓점을, 추적 모드는 같은 클래스의 Track bbox를 3개 이상 클릭
+  4. 「다각형 완료」로 고정 또는 ByteTrack 추적 영역을 저장
 - **실시간 침입 판별**:
   - `cv2.pointPolygonTest`로 bbox 중심점이 zone 내부인지 검사
   - zone 내 객체 없음: 초록 테두리
@@ -245,8 +243,6 @@ cls_ids = results[0].boxes.cls.cpu().numpy().astype(int)
   - zone 라벨에 `(N)` 형태로 내부 객체 수 실시간 표시
 - `infer_every`: N프레임마다 1회 추론 (기본값 3)
 - `display_interval = 1/15`: 15fps yield 제한
-- zone 라벨은 항상 영어로 출력 (시스템 프롬프트 강제)
-- Ollama API: `http://localhost:11434/api/chat`, `format="json"` 강제
 - 중지 버튼: 스트림 종료 + `_zones` 초기화 + `_last_frame` 초기화
 - 영역 상태는 `gr.State`의 세션 ID별 `ZoneRuntime`으로 분리한다. 실시간 영상과
   Track 목록은 「현재 프레임 가져오기」 시 함께 고정하며, 고정 편집 이미지의
@@ -256,8 +252,6 @@ cls_ids = results[0].boxes.cls.cpu().numpy().astype(int)
   중앙을 anchor로 저장하며, 추적 영역이 활성화된 동안 추론 간격을 1로 강제한다.
 - 추적 anchor 유실 시 마지막 위치를 유지하고 주황색으로 표시한다. 모든 추적
   anchor ID는 침입 집계에서 제외하며, 겹친 영역의 같은 Track ID는 한 번만 센다.
-- Ollama 모델은 화면의 다운로드 버튼이 `/api/tags`로 설치 여부를 확인하고
-  `/api/pull` 스트림으로 `gemma4:e4b`를 명시적으로 설치한다.
 
 ---
 

@@ -11,7 +11,6 @@ from pipeline import (
     inference,
     labeler,
     models,
-    ollama_client,
     trainer,
     webcams,
     zone_monitor,
@@ -979,7 +978,7 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
 
         # ── 침입 감지 ────────────────────────────────────────
         with gr.Tab("침입 감지") as panel_zone:
-            gr.Markdown("### 로컬 LLM 영역 설정 & 실시간 침입 감지")
+            gr.Markdown("### 수동·추적 영역 실시간 침입 감지")
             zm_session_id = gr.State(
                 value=zone_monitor.create_session,
                 time_to_live=3600,
@@ -1131,6 +1130,7 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
                 zm_clear_draft_btn = gr.Button("작성 중인 점 지우기")
                 zm_finish_btn = gr.Button("다각형 완료", variant="primary")
                 zm_clear_zones_btn = gr.Button("모든 영역 지우기", variant="stop")
+            zm_zone_status = gr.Textbox(label="영역 편집 상태", interactive=False)
 
             zm_youtube_sample_btn.click(
                 fn=load_sample_youtube_url,
@@ -1144,30 +1144,6 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
                 fn=load_sample_image_folder,
                 outputs=[zm_folder_files, zm_stream_status],
             )
-
-            gr.Markdown("---")
-            gr.Markdown("#### 영역 설정 (로컬 LLM)")
-
-            with gr.Row():
-                zm_prompt = gr.Textbox(
-                    placeholder="예: 문 앞쪽 출입 구역, 컨베이어 벨트 위",
-                    label="감시 영역 설명",
-                    scale=3,
-                )
-                zm_model = gr.Textbox(
-                    value="gemma4:e4b",
-                    placeholder="gemma4:e4b",
-                    label="Ollama 모델",
-                    scale=1,
-                )
-
-            with gr.Row():
-                zm_set_btn = gr.Button("영역 설정 (LLM 분석)", variant="secondary")
-                zm_pull_btn = gr.Button("Gemma 모델 다운로드")
-
-            zm_zone_status  = gr.Textbox(label="영역 설정 결과", interactive=False)
-            zm_pull_status = gr.Textbox(label="Ollama 모델 상태", interactive=False)
-            zm_llm_log      = gr.Code(label="LLM 응답 (JSON)", language="json", interactive=False)
 
             zm_prepare_event = zm_start_btn.click(
                 fn=zone_monitor.prepare_stream,
@@ -1187,17 +1163,6 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
                 inputs=zm_session_id,
                 outputs=[zm_preview, zm_zone_editor, zm_stream_status, zm_zone_status],
                 cancels=[zm_stream_event],
-            )
-            zm_set_btn.click(
-                fn=zone_monitor.set_zone,
-                inputs=[zm_session_id, zm_prompt, zm_model],
-                outputs=[zm_zone_status, zm_llm_log],
-            )
-            zm_pull_btn.click(
-                fn=ollama_client.pull_model,
-                inputs=zm_model,
-                outputs=zm_pull_status,
-                show_progress="hidden",
             )
             zm_snapshot_btn.click(
                 fn=zone_monitor.capture_editor_frame,

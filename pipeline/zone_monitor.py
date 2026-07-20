@@ -1,10 +1,8 @@
-"""Tab 7: 세션별 수동/LLM/ByteTrack 추적 영역 침입 감시."""
+"""Tab 7: 세션별 수동/ByteTrack 추적 영역 침입 감시."""
 
 from __future__ import annotations
 
-import base64
 import copy
-import json
 import threading
 import time
 import uuid
@@ -13,9 +11,8 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-import requests
 
-from pipeline import media, models, ollama_client, vision
+from pipeline import media, models, vision
 
 
 MODE_MANUAL = "manual"
@@ -51,7 +48,6 @@ class ZoneRuntime:
     lock: threading.RLock = field(default_factory=threading.RLock)
     stop_event: threading.Event = field(default_factory=threading.Event)
     run_id: str = ""
-    revision: int = 0
     zones: list[dict] = field(default_factory=list)
     draft_points: list[tuple[float, float]] = field(default_factory=list)
     draft_anchors: list[dict] = field(default_factory=list)
@@ -572,7 +568,6 @@ def finish_draft(session_id: str, mode: str, label: str):
                 }
             )
             runtime.draft_points.clear()
-        runtime.revision += 1
         return _render_editor_locked(runtime), f"영역 설정 완료: {zone_label}"
 
 
@@ -582,7 +577,6 @@ def clear_zones(session_id: str):
         runtime.zones.clear()
         runtime.draft_points.clear()
         runtime.draft_anchors.clear()
-        runtime.revision += 1
         return _render_editor_locked(runtime), "모든 감시 영역을 지웠습니다."
 
 
@@ -595,7 +589,6 @@ def reset(session_id: str):
     runtime.stop_event.set()
     with runtime.lock:
         runtime.run_id = uuid.uuid4().hex
-        runtime.revision += 1
         runtime.zones.clear()
         runtime.draft_points.clear()
         runtime.draft_anchors.clear()
@@ -613,7 +606,6 @@ def prepare_stream(session_id: str):
     runtime.stop_event.set()
     with runtime.lock:
         runtime.run_id = uuid.uuid4().hex
-        runtime.revision += 1
         runtime.zones.clear()
         runtime.draft_points.clear()
         runtime.draft_anchors.clear()
@@ -631,7 +623,6 @@ def _begin_stream(runtime: ZoneRuntime) -> tuple[str, threading.Event]:
     with runtime.lock:
         runtime.stop_event = current_event
         runtime.run_id = run_id
-        runtime.revision += 1
         # 새 소스/모델의 좌표와 Track ID는 이전 스트림과 호환되지 않는다.
         runtime.zones.clear()
         runtime.draft_points.clear()
@@ -903,7 +894,7 @@ def _stream_folder(
             yield vision.to_rgb(annotated), status
             stop_event.wait(0.4)
         # 폴더의 끝→처음은 실제 시간축이 아니며 ByteTrack ID가 재사용될 수 있다.
-        # 고정/LLM 영역은 유지하되 추적 영역은 폐기해 다른 객체로 이동하지 않게 한다.
+        # 고정 영역은 유지하되 추적 영역은 폐기해 다른 객체로 이동하지 않게 한다.
         _reset_model_trackers(model)
         with runtime.lock:
             invalidated = _invalidate_tracked_zones_locked(runtime)
@@ -917,101 +908,3 @@ def _stream_folder(
 
     if _is_current(runtime, run_id, stop_event):
         yield None, "스트림 종료"
-
-
-def set_zone(session_id: str, prompt: str, model: str):
-    """현재 프레임을 Ollama VLM에 보내 LLM 고정 영역을 추가한다."""
-
-    runtime = _runtime(session_id)
-    if not (prompt or "").strip():
-        return "프롬프트를 입력하세요.", ""
-
-    with runtime.lock:
-        if runtime.last_frame is None:
-            return "먼저 스트림을 시작하세요.", ""
-        frame = runtime.last_frame.copy()
-        request_run_id = runtime.run_id
-        request_revision = runtime.revision
-
-    _, buffer = cv2.imencode(".jpg", frame)
-    image_b64 = base64.b64encode(buffer).decode("utf-8")
-    system_prompt = (
-        "You are a zone detection assistant. Analyze the image and return monitoring zones "
-        "as JSON only — no explanation, no markdown.\n"
-        'Schema: {"zones": [{"label": "string", "x1": 0.0, "y1": 0.0, '
-        '"x2": 1.0, "y2": 1.0}]}\n'
-        "All coordinates normalized 0.0–1.0. x1,y1=top-left corner, "
-        "x2,y2=bottom-right corner.\n"
-        "IMPORTANT: The label field must always be in English, regardless of the input language."
-    )
-    payload = {
-        "model": (model or "").strip() or ollama_client.DEFAULT_MODEL,
-        "format": "json",
-        "stream": False,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {
-                "role": "user",
-                "content": f"Identify the monitoring zone(s) for: {prompt}",
-                "images": [image_b64],
-            },
-        ],
-    }
-
-    content = ""
-    try:
-        response = requests.post(
-            ollama_client.api_url("chat"),
-            json=payload,
-            timeout=120,
-        )
-        response.raise_for_status()
-        content = response.json()["message"]["content"]
-        parsed = json.loads(content)
-    except requests.exceptions.ConnectionError:
-        return (
-            f"Ollama 연결 실패 ({ollama_client.base_url()}). "
-            "Ollama가 실행 중인지 확인하세요.",
-            "",
-        )
-    except json.JSONDecodeError as exc:
-        return f"LLM 응답 파싱 실패: {exc}", content
-    except Exception as exc:
-        return f"영역 설정 실패: {exc}", ""
-
-    formatted = json.dumps(parsed, ensure_ascii=False, indent=2)
-    zones: list[dict] = []
-    for item in parsed.get("zones", []):
-        try:
-            x1 = float(np.clip(item["x1"], 0.0, 1.0))
-            y1 = float(np.clip(item["y1"], 0.0, 1.0))
-            x2 = float(np.clip(item["x2"], 0.0, 1.0))
-            y2 = float(np.clip(item["y2"], 0.0, 1.0))
-            if x2 <= x1 or y2 <= y1:
-                continue
-            zones.append(
-                {
-                    "id": uuid.uuid4().hex,
-                    "label": str(item.get("label", "LLM zone")),
-                    "mode": "llm",
-                    "points": [[x1, y1], [x2, y1], [x2, y2], [x1, y2]],
-                }
-            )
-        except (KeyError, TypeError, ValueError):
-            continue
-
-    if not zones:
-        return "LLM이 유효한 영역을 반환하지 않았습니다.", formatted
-
-    with runtime.lock:
-        if (
-            runtime.run_id != request_run_id
-            or runtime.revision != request_revision
-        ):
-            return "상태가 바뀌어 이전 LLM 응답을 적용하지 않았습니다.", formatted
-        runtime.zones = [zone for zone in runtime.zones if zone.get("mode") != "llm"]
-        runtime.zones.extend(zones)
-        runtime.revision += 1
-
-    labels = [zone["label"] for zone in zones]
-    return f"LLM 영역 설정 완료: {', '.join(labels)}", formatted
