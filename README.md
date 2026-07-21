@@ -11,7 +11,7 @@ YouTube URL, 웹캠, 비디오 파일, 이미지 폴더를 입력으로 받아 �
 - 데이터셋 검토/구성: 라벨 확인, 클래스명 편집, train/val 분할
 - YOLO 학습: 학습 로그 스트리밍, 결과 모델 저장
 - 추론: 학습된 모델로 영상/이미지 소스 추론
-- 침입 감지: 로컬 LLM으로 감시 영역을 설정하고 YOLO로 영역 내 객체 감지
+- 침입 감지: `Safety Cone`을 자동 추적해 라바콘 사이에 감시 영역을 만들고 영역 내 객체 감지
 - 샘플 불러오기: `samples/`의 URL, 비디오, 이미지 폴더를 카드 버튼으로 선택
 
 ## 설치
@@ -41,10 +41,14 @@ bash install_cpu.sh
 
 ```powershell
 venv\Scripts\Activate.ps1
-python app.py
+gradio app.py
 ```
 
 브라우저에서 `http://localhost:7860`에 접속합니다.
+
+웹캠은 브라우저가 열린 PC의 카메라가 아니라 **앱 서버에 연결된 카메라**를
+OpenCV로 사용합니다. Raspberry Pi에서는 USB/V4L2 장치(`/dev/video*`) 권한과
+다른 프로세스의 카메라 점유 여부를 먼저 확인하세요.
 
 ## 폴더 구조
 
@@ -57,6 +61,7 @@ yolo-webui/
 │   ├── extractor.py
 │   ├── labeler.py
 │   ├── dataset.py
+│   ├── dataset_importer.py
 │   ├── trainer.py
 │   ├── inference.py
 │   └── zone_monitor.py
@@ -68,16 +73,6 @@ yolo-webui/
 ├── models/    # 모델 가중치
 └── runs/      # 학습 결과
 ```
-
-## 외부 서비스
-
-침입 감지의 자연어 영역 설정을 쓰려면 Ollama가 실행 중이어야 합니다.
-
-```powershell
-ollama serve
-```
-
-사용 모델: `gemma4:e4b`
 
 ## 라이선스
 

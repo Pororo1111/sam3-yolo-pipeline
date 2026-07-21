@@ -1,9 +1,18 @@
 import html as _html
-import urllib.parse as _urlparse
 from pathlib import Path
 
 import gradio as gr
-from pipeline import extractor, labeler, dataset, trainer, inference, zone_monitor, models, webcams
+from pipeline import (
+    dataset,
+    dataset_importer,
+    extractor,
+    inference,
+    labeler,
+    models,
+    trainer,
+    webcams,
+    zone_monitor,
+)
 
 
 SAMPLES_DIR = Path("samples")
@@ -59,139 +68,53 @@ def load_sample_image_folder():
 
 
 def run_capture(source_type, youtube_url, capture_fps, folder_files, webcam_index, video_file):
-    emit_preview = source_type == "이미지 폴더"
-    for frame, status in extractor.capture(
+    yield from extractor.capture(
         source_type,
         youtube_url,
         int(capture_fps),
         folder_files,
         webcam_index,
         video_file,
-        emit_preview=emit_preview,
-    ):
-        yield (frame if emit_preview else gr.update(), status)
-
-
-def _youtube_embed_html(url: str) -> tuple[str | None, str | None]:
-    """일반 YouTube URL에서 iframe embed HTML을 만든다."""
-    raw = (url or "").strip()
-    if not raw:
-        return None, "YouTube URL을 입력하세요."
-
-    parsed = _urlparse.urlparse(raw)
-    host = parsed.netloc.lower().removeprefix("www.")
-    video_id = ""
-
-    if host == "youtu.be":
-        video_id = parsed.path.strip("/").split("/")[0]
-    elif "youtube.com" in host:
-        if parsed.path == "/watch":
-            video_id = _urlparse.parse_qs(parsed.query).get("v", [""])[0]
-        elif parsed.path.startswith("/shorts/") or parsed.path.startswith("/embed/") or parsed.path.startswith("/live/"):
-            parts = [p for p in parsed.path.split("/") if p]
-            if len(parts) >= 2:
-                video_id = parts[1]
-
-    if not video_id:
-        return None, "지원하지 않는 YouTube URL 형식입니다."
-
-    safe_id = _html.escape(video_id, quote=True)
-    src = f"https://www.youtube.com/embed/{safe_id}?autoplay=1&mute=1&playsinline=1"
-    return (
-        '<div class="youtube-preview">'
-        f'<iframe src="{src}" title="YouTube 미리보기" '
-        'allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" '
-        'allowfullscreen></iframe>'
-        "</div>"
-    ), None
-
-
-def _local_video_html(path: str) -> str:
-    """로컬 비디오를 Gradio 변환 없이 브라우저 video 태그로 표시한다."""
-    encoded = _urlparse.quote(str(Path(path).resolve()), safe="")
-    src = f"/gradio_api/file={encoded}"
-    return (
-        '<div class="local-video-preview">'
-        f'<video src="{src}" controls autoplay muted playsinline></video>'
-        "</div>"
     )
 
 
-def prepare_capture_preview(source_type, youtube_url, video_file):
-    """캡처 전에 브라우저 네이티브 비디오 미리보기 영역을 소스별로 전환한다."""
-    image_visible = source_type == "이미지 폴더"
-    if source_type == "YouTube URL":
-        html, err = _youtube_embed_html(youtube_url)
-        if err:
-            return (
-                gr.update(value="", visible=False),
-                gr.update(value=None, visible=False),
-                gr.update(visible=False),
-                gr.update(visible=image_visible),
-                err,
-            )
-        return (
-            gr.update(value=html, visible=True),
-            gr.update(value=None, visible=False),
-            gr.update(visible=False),
-            gr.update(visible=False),
-            "YouTube 미리보기 준비 완료. 캡처를 시작합니다.",
-        )
-
-    if source_type == "비디오 파일":
-        src, err = extractor.video_preview_source(source_type, youtube_url, video_file)
-        if err:
-            return (
-                gr.update(value="", visible=False),
-                gr.update(value="", visible=False),
-                gr.update(visible=False),
-                gr.update(visible=image_visible),
-                err,
-            )
-        return (
-            gr.update(value="", visible=False),
-            gr.update(value=_local_video_html(src), visible=True),
-            gr.update(visible=False),
-            gr.update(visible=False),
-            "비디오 미리보기 준비 완료. 캡처를 시작합니다.",
-        )
-
-    if source_type == "웹캠":
-        return (
-            gr.update(value="", visible=False),
-            gr.update(value="", visible=False),
-            gr.update(visible=True),
-            gr.update(visible=False),
-            "웹캠 미리보기를 준비했습니다. 브라우저 권한을 허용하세요.",
-        )
-
-    return (
-        gr.update(value="", visible=False),
-        gr.update(value="", visible=False),
-        gr.update(visible=False),
-        gr.update(visible=True),
-        "이미지 폴더 캡처를 시작합니다.",
-    )
+def prepare_capture_preview():
+    """공용 이미지 스트림을 비우고 새 캡처를 준비한다."""
+    return None, "실시간 미리보기를 준비합니다."
 
 
 def stop_capture_and_reset():
     """캡처 중지 후 미리보기 영역을 초기 상태로 되돌린다."""
     status = extractor.stop()
-    return (
-        gr.update(value="", visible=False),
-        gr.update(value="", visible=False),
-        gr.update(value=None, visible=False),
-        gr.update(value=None, visible=True),
-        status,
-    )
+    return None, status
 
 
 def run_inference(model_path, source_type, youtube_url, conf, infer_every, folder_files, webcam_index, video_file):
     yield from inference.predict(model_path, source_type, youtube_url, conf, infer_every, folder_files, webcam_index, video_file)
 
 
-def run_zone_stream(source_type, youtube_url, model_path, conf, infer_every, folder_files, webcam_index, video_file):
-    yield from zone_monitor.stream(source_type, youtube_url, model_path, conf, infer_every, folder_files, webcam_index, video_file)
+def run_zone_stream(
+    session_id,
+    source_type,
+    youtube_url,
+    model_path,
+    conf,
+    infer_every,
+    folder_files,
+    webcam_index,
+    video_file,
+):
+    yield from zone_monitor.stream(
+        session_id,
+        source_type,
+        youtube_url,
+        model_path,
+        conf,
+        infer_every,
+        folder_files,
+        webcam_index,
+        video_file,
+    )
 
 
 def load_classes(label_prompts):
@@ -228,6 +151,129 @@ def refresh_base_model_dropdown():
     return gr.update(choices=_base_model_choices())
 
 
+def _dataset_choices(records):
+    return [
+        (
+            f"{record['name']} · train {record['train_images']:,} / "
+            f"val {record['val_images']:,} · {len(record['classes'])} classes",
+            record["yaml"],
+        )
+        for record in (records or [])
+    ]
+
+
+def _dataset_table(records):
+    return [
+        [
+            record["name"],
+            record.get("source", "외부 데이터셋"),
+            record["train_images"],
+            record["val_images"],
+            record["boxes"],
+            record["missing_labels"],
+            record["empty_labels"],
+            ", ".join(record["classes"]),
+            record["yaml"],
+        ]
+        for record in (records or [])
+    ]
+
+
+def _valid_dataset_selection(records, selected):
+    available = {
+        str(record["yaml"]).casefold(): record["yaml"] for record in (records or [])
+    }
+    result = []
+    seen = set()
+    for path in selected or []:
+        key = str(path).casefold()
+        if key in available and key not in seen:
+            result.append(available[key])
+            seen.add(key)
+    return result
+
+
+def _dataset_selection_text(records, selected):
+    valid, message = dataset_importer.selection_summary(records, selected)
+    return f"{'✅' if valid else '⚠️'} **학습 데이터셋:** {message}"
+
+
+def _dataset_ui_result(records, selected, message):
+    selected = _valid_dataset_selection(records, selected)
+    summary = _dataset_selection_text(records, selected)
+    return (
+        records,
+        gr.update(choices=_dataset_choices(records), value=selected),
+        _dataset_table(records),
+        message,
+        summary,
+        summary,
+    )
+
+
+def add_archive_datasets(archive_files, records, selected):
+    try:
+        records, added = dataset_importer.register_archives(archive_files, records)
+        selected = _valid_dataset_selection(records, selected)
+        selected_keys = {str(path).casefold() for path in selected}
+        for record in added:
+            key = str(record["yaml"]).casefold()
+            if key not in selected_keys:
+                selected.append(record["yaml"])
+                selected_keys.add(key)
+        message = (
+            f"✅ {len(added)}개 데이터셋을 압축 해제·검사하고 등록했습니다: "
+            + ", ".join(record["name"] for record in added)
+        )
+    except dataset_importer.DatasetImportError as exc:
+        message = f"❌ 등록 실패\n\n{exc}"
+    return _dataset_ui_result(records or [], selected or [], message)
+
+
+def refresh_datasets(records, selected):
+    records, errors = dataset_importer.refresh_registry(records)
+    message = f"✅ 등록된 데이터셋 {len(records)}개를 다시 검사했습니다."
+    if errors:
+        message += "\n\n⚠️ 사용할 수 없어 제외한 항목:\n" + "\n".join(
+            f"- {error}" for error in errors
+        )
+    return _dataset_ui_result(records, selected, message)
+
+
+def remove_external_datasets(records, selected):
+    selected_set = {str(path).casefold() for path in (selected or [])}
+    default_yaml = str(dataset_importer.DEFAULT_DATASET_YAML.resolve()).casefold()
+    removed = [
+        record
+        for record in (records or [])
+        if str(record["yaml"]).casefold() in selected_set
+        and str(record["yaml"]).casefold() != default_yaml
+    ]
+    records = [
+        record
+        for record in (records or [])
+        if record not in removed
+    ]
+    remaining_selection = [
+        path
+        for path in (selected or [])
+        if str(path).casefold() not in {
+            str(record["yaml"]).casefold() for record in removed
+        }
+    ]
+    message = (
+        f"✅ 외부 데이터셋 {len(removed)}개를 현재 목록에서 제거했습니다."
+        if removed
+        else "ℹ️ 제거할 외부 데이터셋이 선택되지 않았습니다."
+    )
+    return _dataset_ui_result(records, remaining_selection, message)
+
+
+def update_dataset_selection_status(records, selected):
+    summary = _dataset_selection_text(records, selected)
+    return summary, summary
+
+
 def run_label(prompts_str, conf):
     yield from labeler.label(prompts_str, float(conf))
 
@@ -235,6 +281,11 @@ def run_label(prompts_str, conf):
 def on_gallery_select(prompts_str, filter_empty, evt: gr.SelectData):
     """갤러리 선택 이벤트 래퍼 — SelectData 어노테이션으로 evt 주입을 명시."""
     return dataset.select_frame(prompts_str, filter_empty, evt)
+
+
+def on_zone_editor_select(session_id, mode, evt: gr.SelectData):
+    """고정 편집 프레임의 자연 크기 좌표를 영역 서비스에 전달한다."""
+    return zone_monitor.select_editor_point(session_id, mode, evt.index)
 
 
 def run_label_preview(prompts_str, conf, n_preview):
@@ -252,8 +303,26 @@ _PRE_STYLE = (
 )
 
 
-def run_train(epochs, imgsz, batch, lr0, device, name, base_model):
-    for text in trainer.train(epochs, imgsz, batch, lr0, device, name, base_model):
+def run_train(
+    epochs,
+    imgsz,
+    batch,
+    lr0,
+    device,
+    name,
+    base_model,
+    dataset_yamls=None,
+):
+    for text in trainer.train(
+        epochs,
+        imgsz,
+        batch,
+        lr0,
+        device,
+        name,
+        base_model,
+        dataset_yamls,
+    ):
         escaped = _html.escape(text)
         yield f'<div style="{_WRAP_STYLE}"><pre style="{_PRE_STYLE}">{escaped}</pre></div>'
 
@@ -266,11 +335,6 @@ _CSS = (
     # 미리보기 갤러리: 항상 4열 격자로 고정. Gradio는 이미지 수에 맞춰 --grid-cols를
     # 줄여(1장이면 1열) 이미지가 칸 전체로 커지므로, grid-template-columns를 4열로 강제.
     "#label_gallery .grid-container { grid-template-columns: repeat(4, minmax(0, 1fr)) !important; }"
-    "#cap_webcam_preview video { max-height: 520px; object-fit: contain; background: #111; }"
-    ".youtube-preview { width: 100%; aspect-ratio: 16 / 9; background: #111; }"
-    ".youtube-preview iframe { width: 100%; height: 100%; border: 0; display: block; }"
-    ".local-video-preview { width: 100%; aspect-ratio: 16 / 9; background: #111; }"
-    ".local-video-preview video { width: 100%; height: 100%; object-fit: contain; display: block; }"
     ".sample-card button { min-height: 72px; border: 1px solid #d4d4d8 !important; "
     "background: #fff !important; color: #18181b !important; text-align: left; "
     "justify-content: flex-start; box-shadow: 0 1px 2px rgba(0,0,0,.06); }"
@@ -370,24 +434,7 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
                 cap_start_btn = gr.Button("캡처 시작", variant="primary")
                 cap_stop_btn  = gr.Button("중지", variant="stop")
 
-            cap_youtube_preview = gr.HTML(
-                label="YouTube 미리보기",
-                visible=False,
-            )
-            cap_video_preview = gr.HTML(
-                label="영상 미리보기",
-                visible=False,
-                elem_id="cap_video_preview",
-            )
-            cap_webcam_preview = gr.Video(
-                label="웹캠 미리보기",
-                sources=["webcam"],
-                streaming=True,
-                autoplay=True,
-                visible=False,
-                elem_id="cap_webcam_preview",
-            )
-            cap_preview = gr.Image(label="이미지 폴더 미리보기", type="numpy", streaming=True)
+            cap_preview = gr.Image(label="실시간 미리보기", type="numpy", streaming=True)
             cap_status  = gr.Textbox(label="상태", interactive=False)
 
             youtube_sample_btn.click(
@@ -405,17 +452,19 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
 
             cap_prepare_event = cap_start_btn.click(
                 fn=prepare_capture_preview,
-                inputs=[source_type, youtube_url, video_file],
-                outputs=[cap_youtube_preview, cap_video_preview, cap_webcam_preview, cap_preview, cap_status],
+                outputs=[cap_preview, cap_status],
             )
             capture_event = cap_prepare_event.then(
                 fn=run_capture,
                 inputs=[source_type, youtube_url, capture_fps, folder_files, webcam_index, video_file],
                 outputs=[cap_preview, cap_status],
+                show_progress="hidden",
+                concurrency_limit=1,
+                concurrency_id="frame_capture",
             )
             cap_stop_btn.click(
                 fn=stop_capture_and_reset,
-                outputs=[cap_youtube_preview, cap_video_preview, cap_webcam_preview, cap_preview, cap_status],
+                outputs=[cap_preview, cap_status],
                 cancels=[capture_event],
             )
             webcam_refresh.click(
@@ -602,9 +651,96 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
                 outputs=[ds_class_state, ds_prompts, ds_last_label],
             )
 
+        # ── 외부 데이터셋 불러오기 ───────────────────────────
+        with gr.Tab("데이터셋 불러오기") as panel_dataset_import:
+            gr.Markdown("### 학습 데이터셋 불러오기")
+            gr.Markdown(
+                "기존 **데이터셋 검토 & 구성** 단계에서 만든 데이터셋과 외부 YOLO 탐지 "
+                "데이터셋을 함께 관리합니다. 클래스 구성이 다른 데이터셋도 원본 라벨을 "
+                "건드리지 않고 학습용 복사본에서 클래스 ID를 자동 통합합니다."
+            )
+
+            initial_dataset_records = dataset_importer.initial_registry()
+            initial_dataset_selection = [
+                record["yaml"] for record in initial_dataset_records
+            ]
+            dataset_registry_state = gr.State(value=initial_dataset_records)
+
+            dataset_archives = gr.File(
+                label="YOLO 데이터셋 ZIP 업로드 (여러 개 가능)",
+                file_count="multiple",
+                type="filepath",
+                file_types=[".zip"],
+                height=180,
+            )
+            archive_dataset_add = gr.Button(
+                "ZIP 압축 해제 후 등록",
+                variant="primary",
+            )
+
+            gr.Markdown(
+                "> ZIP은 각 데이터셋의 `data.yaml`, `train/images`, `train/labels`, "
+                "`valid/images`, `valid/labels` 같은 폴더 구조를 포함해야 합니다."
+            )
+
+            with gr.Row():
+                dataset_refresh_btn = gr.Button("등록 목록 다시 검사")
+                dataset_remove_btn = gr.Button(
+                    "선택한 외부 데이터셋을 목록에서 제거",
+                    variant="stop",
+                )
+
+            training_dataset_select = gr.CheckboxGroup(
+                choices=_dataset_choices(initial_dataset_records),
+                value=initial_dataset_selection,
+                label="학습에 사용할 데이터셋",
+                info="체크한 데이터셋을 한 번의 학습에 함께 적용합니다. "
+                     "클래스 구성이 다르면 통합 클래스 목록으로 라벨 ID를 자동 재매핑합니다.",
+            )
+            initial_dataset_summary = _dataset_selection_text(
+                initial_dataset_records,
+                initial_dataset_selection,
+            )
+            dataset_selection_status = gr.Markdown(initial_dataset_summary)
+            dataset_import_status = gr.Markdown(
+                "YOLO 데이터셋 ZIP을 하나 이상 업로드하세요."
+            )
+            dataset_registry_table = gr.Dataframe(
+                value=_dataset_table(initial_dataset_records),
+                headers=[
+                    "데이터셋",
+                    "소스",
+                    "Train",
+                    "Val",
+                    "BBox",
+                    "라벨 누락",
+                    "빈 라벨",
+                    "클래스",
+                    "YAML",
+                ],
+                datatype=[
+                    "str",
+                    "str",
+                    "number",
+                    "number",
+                    "number",
+                    "number",
+                    "number",
+                    "str",
+                    "str",
+                ],
+                interactive=False,
+                label="등록된 데이터셋 검사 결과",
+                wrap=True,
+            )
+
         # ── YOLO 학습 ────────────────────────────────────────
         with gr.Tab("YOLO 학습") as panel_train:
             gr.Markdown("### YOLO 모델 학습")
+            train_dataset_summary = gr.Markdown(initial_dataset_summary)
+            gr.Markdown(
+                "학습 데이터 변경은 **데이터셋 불러오기** 탭에서 선택하세요."
+            )
             gr.Markdown(
                 "> **파라미터 안내** — 아래 값은 ultralytics 기본값 기준이며 최적화된 값이 아닙니다. "
                 "데이터셋 크기·GPU 환경에 따라 조정하세요."
@@ -675,7 +811,7 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
             train_event = train_start_btn.click(
                 fn=run_train,
                 inputs=[epochs_slider, imgsz_slider, batch_slider, lr0_slider, device_radio,
-                        train_name, base_model_dd],
+                        train_name, base_model_dd, training_dataset_select],
                 outputs=train_log,
             )
             train_stop_btn.click(
@@ -840,7 +976,12 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
 
         # ── 침입 감지 ────────────────────────────────────────
         with gr.Tab("침입 감지") as panel_zone:
-            gr.Markdown("### 로컬 LLM 영역 설정 & 실시간 침입 감지")
+            gr.Markdown("### Safety Cone 자동 추적 침입 감지")
+            zm_session_id = gr.State(
+                value=zone_monitor.create_session,
+                time_to_live=3600,
+                delete_callback=zone_monitor.delete_session,
+            )
 
             _zm_models = models.list_trained_models()
             with gr.Row():
@@ -854,15 +995,11 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
                 )
                 zm_model_refresh = gr.Button("모델 목록 새로고침", scale=1)
 
-            with gr.Row():
-                zm_conf = gr.Slider(
-                    minimum=0.05, maximum=0.95, value=0.15, step=0.05,
-                    label="신뢰도 임계값 (conf)",
-                )
-                zm_skip = gr.Slider(
-                    minimum=1, maximum=10, value=3, step=1,
-                    label="추론 간격 (N프레임마다 1회)",
-                )
+            zm_conf = gr.Slider(
+                minimum=0.05, maximum=0.95, value=0.15, step=0.05,
+                label="신뢰도 임계값 (conf)",
+            )
+            zm_skip = gr.State(1)
 
             with gr.Row():
                 zm_source_type = gr.Radio(
@@ -954,8 +1091,55 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
                 zm_start_btn = gr.Button("스트림 시작", variant="primary")
                 zm_stop_btn  = gr.Button("중지 / 초기화", variant="stop")
 
-            zm_preview = gr.Image(label="실시간 영상", type="numpy", streaming=True)
+            zm_preview = gr.Image(
+                label="Safety Cone 자동 추적 실시간 영상",
+                type="numpy",
+                streaming=True,
+            )
             zm_stream_status = gr.Textbox(label="상태", interactive=False)
+            gr.Markdown(
+                "`스트림 시작`을 누르면 `Safety Cone`을 매 프레임 추적합니다. "
+                "라바콘 Track이 3개 이상 잡히면 바닥 중심점의 외곽선을 연결해 "
+                "침입 감지 영역을 자동 생성하고 계속 갱신합니다."
+            )
+            gr.Markdown(
+                "**표시 색상 안내**\n\n"
+                "- **초록색 영역**: 영역 안에 침입 객체가 없습니다.\n"
+                "- **빨간색 영역·반투명 채우기**: 영역 안에 침입 객체가 있습니다. "
+                "영역 이름의 `(N)`은 침입 객체 수입니다.\n"
+                "- **주황색 영역·앵커**: 추적하던 Safety Cone의 Track ID가 현재 프레임에서 "
+                "하나 이상 유실되어 마지막 위치를 유지 중입니다.\n"
+                "- **하늘색 점·선**: 정상 추적 중인 Safety Cone 앵커와 자동 감시 경계입니다."
+            )
+
+            gr.Markdown("#### 수동 다각형 영역 추가")
+            gr.Markdown(
+                "스트림 실행 중 **현재 프레임 가져오기**를 누른 뒤, "
+                "영역 꼭짓점을 순서대로 3개 이상 클릭하고 **수동 다각형 완료**를 누르세요."
+            )
+            zm_manual_mode = gr.State(zone_monitor.MODE_MANUAL)
+            with gr.Row():
+                zm_snapshot_btn = gr.Button(
+                    "현재 프레임 가져오기",
+                    variant="secondary",
+                )
+                zm_zone_label = gr.Textbox(
+                    label="수동 영역 이름",
+                    placeholder="예: Entrance",
+                )
+            zm_zone_editor = gr.Image(
+                label="수동 영역 편집 (고정 프레임의 꼭짓점을 클릭하세요)",
+                type="numpy",
+                interactive=False,
+            )
+            with gr.Row():
+                zm_undo_btn = gr.Button("마지막 점 취소")
+                zm_clear_draft_btn = gr.Button("작성 중인 점 지우기")
+                zm_finish_btn = gr.Button("수동 다각형 완료", variant="primary")
+            zm_zone_status = gr.Textbox(
+                label="수동 영역 편집 상태",
+                interactive=False,
+            )
 
             zm_youtube_sample_btn.click(
                 fn=load_sample_youtube_url,
@@ -970,40 +1154,69 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
                 outputs=[zm_folder_files, zm_stream_status],
             )
 
-            gr.Markdown("---")
-            gr.Markdown("#### 영역 설정 (로컬 LLM)")
-
-            with gr.Row():
-                zm_prompt = gr.Textbox(
-                    placeholder="예: 문 앞쪽 출입 구역, 컨베이어 벨트 위",
-                    label="감시 영역 설명",
-                    scale=3,
-                )
-                zm_model = gr.Textbox(
-                    value="gemma4:e4b",
-                    placeholder="gemma4:e4b",
-                    label="Ollama 모델",
-                    scale=1,
-                )
-
-            zm_set_btn = gr.Button("영역 설정 (LLM 분석)", variant="secondary")
-
-            zm_zone_status  = gr.Textbox(label="영역 설정 결과", interactive=False)
-            zm_llm_log      = gr.Code(label="LLM 응답 (JSON)", language="json", interactive=False)
-
-            zm_stream_event = zm_start_btn.click(
+            zm_prepare_event = zm_start_btn.click(
+                fn=zone_monitor.prepare_stream,
+                inputs=zm_session_id,
+                outputs=[
+                    zm_preview,
+                    zm_zone_editor,
+                    zm_stream_status,
+                    zm_zone_status,
+                ],
+                show_progress="hidden",
+            )
+            zm_stream_event = zm_prepare_event.then(
                 fn=run_zone_stream,
-                inputs=[zm_source_type, zm_youtube_url, zm_model_path, zm_conf, zm_skip, zm_folder_files, zm_webcam_index, zm_video_file],
+                inputs=[zm_session_id, zm_source_type, zm_youtube_url, zm_model_path, zm_conf, zm_skip, zm_folder_files, zm_webcam_index, zm_video_file],
                 outputs=[zm_preview, zm_stream_status],
+                concurrency_id="zone_stream",
+                concurrency_limit=1,
             )
             zm_stop_btn.click(
                 fn=zone_monitor.reset,
+                inputs=zm_session_id,
+                outputs=[
+                    zm_preview,
+                    zm_zone_editor,
+                    zm_stream_status,
+                    zm_zone_status,
+                ],
                 cancels=[zm_stream_event],
             )
-            zm_set_btn.click(
-                fn=zone_monitor.set_zone,
-                inputs=[zm_prompt, zm_model],
-                outputs=[zm_zone_status, zm_llm_log],
+            zm_snapshot_btn.click(
+                fn=zone_monitor.capture_editor_frame,
+                inputs=[zm_session_id, zm_manual_mode],
+                outputs=[zm_zone_editor, zm_zone_status],
+                concurrency_id="zone_editor",
+                concurrency_limit=1,
+            )
+            zm_zone_editor.select(
+                fn=on_zone_editor_select,
+                inputs=[zm_session_id, zm_manual_mode],
+                outputs=[zm_zone_editor, zm_zone_status],
+                concurrency_id="zone_editor",
+                concurrency_limit=1,
+            )
+            zm_undo_btn.click(
+                fn=zone_monitor.undo_draft_point,
+                inputs=[zm_session_id, zm_manual_mode],
+                outputs=[zm_zone_editor, zm_zone_status],
+                concurrency_id="zone_editor",
+                concurrency_limit=1,
+            )
+            zm_clear_draft_btn.click(
+                fn=zone_monitor.clear_draft,
+                inputs=zm_session_id,
+                outputs=[zm_zone_editor, zm_zone_status],
+                concurrency_id="zone_editor",
+                concurrency_limit=1,
+            )
+            zm_finish_btn.click(
+                fn=zone_monitor.finish_draft,
+                inputs=[zm_session_id, zm_manual_mode, zm_zone_label],
+                outputs=[zm_zone_editor, zm_zone_status],
+                concurrency_id="zone_editor",
+                concurrency_limit=1,
             )
             zm_model_refresh.click(
                 fn=refresh_model_dropdown,
@@ -1013,6 +1226,44 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
                 fn=refresh_webcam_dropdown,
                 outputs=zm_webcam_index,
             )
+
+    dataset_ui_outputs = [
+        dataset_registry_state,
+        training_dataset_select,
+        dataset_registry_table,
+        dataset_import_status,
+        dataset_selection_status,
+        train_dataset_summary,
+    ]
+    archive_dataset_add.click(
+        add_archive_datasets,
+        inputs=[
+            dataset_archives,
+            dataset_registry_state,
+            training_dataset_select,
+        ],
+        outputs=dataset_ui_outputs,
+    )
+    dataset_refresh_btn.click(
+        refresh_datasets,
+        inputs=[dataset_registry_state, training_dataset_select],
+        outputs=dataset_ui_outputs,
+    )
+    dataset_remove_btn.click(
+        remove_external_datasets,
+        inputs=[dataset_registry_state, training_dataset_select],
+        outputs=dataset_ui_outputs,
+    )
+    training_dataset_select.change(
+        update_dataset_selection_status,
+        inputs=[dataset_registry_state, training_dataset_select],
+        outputs=[dataset_selection_status, train_dataset_summary],
+    )
+    panel_dataset_import.select(
+        refresh_datasets,
+        inputs=[dataset_registry_state, training_dataset_select],
+        outputs=dataset_ui_outputs,
+    )
 
     # 데이터셋 단계 진입 시 클래스 목록 로드 (네이티브 탭 select 이벤트).
     # Tab 2 프롬프트가 직전 로드와 다르거나(재라벨링) 아직 로드된 적 없으면 새로
@@ -1037,7 +1288,6 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
 
 
 if __name__ == "__main__":
-    # 시작 시 학습용 베이스 모델(yolo26n.pt)이 models/ 에 없으면 자동 다운로드
     models.ensure_models()
     demo.queue().launch(
         theme=gr.themes.Default(),
