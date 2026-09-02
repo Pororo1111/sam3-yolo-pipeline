@@ -18,6 +18,26 @@ class ZoneMonitorTests(unittest.TestCase):
     def tearDown(self):
         zone_monitor.delete_session(self.session_id)
 
+    def test_observation_marks_person_with_contained_iiac_as_worker(self):
+        class Box:
+            def __init__(self, xyxy, class_id, track_id):
+                self.xyxy = np.array([xyxy], dtype=float)
+                self.cls = np.array([class_id])
+                self.conf = np.array([0.9])
+                self.id = np.array([track_id])
+
+        observations = zone_monitor._observations_from_boxes(
+            [
+                Box((10, 10, 90, 90), 0, 1),
+                Box((30, 20, 50, 40), 1, 2),
+            ],
+            {0: "person", 1: "iiac_vest"},
+            (100, 100, 3),
+        )
+
+        self.assertEqual(observations[0].class_name, "woker")
+        self.assertEqual(observations[1].class_name, "iiac_vest")
+
     def test_manual_polygon_uses_normalized_click_coordinates(self):
         for point in ([10, 10], [90, 10], [50, 90]):
             _, status = zone_monitor.select_editor_point(

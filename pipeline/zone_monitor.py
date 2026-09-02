@@ -138,7 +138,19 @@ def _observations_from_boxes(boxes, names: dict, frame_shape) -> list[TrackObser
             )
         except (TypeError, ValueError, IndexError):
             continue
-    return observations
+    worker_indexes = vision.worker_person_indexes(
+        (item.class_name, item.xyxy) for item in observations
+    )
+    return [
+        TrackObservation(
+            track_id=item.track_id,
+            class_id=item.class_id,
+            confidence=item.confidence,
+            class_name="woker" if index in worker_indexes else item.class_name,
+            xyxy=item.xyxy,
+        )
+        for index, item in enumerate(observations)
+    ]
 
 
 def _point_pixels(point, width: int, height: int) -> tuple[int, int]:

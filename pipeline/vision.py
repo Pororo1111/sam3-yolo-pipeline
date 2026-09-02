@@ -10,6 +10,7 @@ import numpy as np
 
 Color = tuple[int, int, int]
 ColorProvider = Callable[[int], Color]
+Detection = tuple[str, tuple[float, float, float, float]]
 
 DISPLAY_MAX_WIDTH = 854
 DEFAULT_BOX_THICKNESS = 4
@@ -30,6 +31,28 @@ _PALETTE: tuple[Color, ...] = (
 
 def class_color(class_id: int) -> Color:
     return _PALETTE[class_id % len(_PALETTE)]
+
+
+def worker_person_indexes(detections: Iterable[Detection]) -> set[int]:
+    """``person`` 안에 ``iiac...`` 검출이 있으면 해당 person 인덱스를 반환한다.
+
+    보호구 bbox 전체가 사람 bbox 안에 꼭 들어맞지 않는 실제 검출 오차를 고려해
+    ``iiac`` 검출 bbox의 중심점 포함 여부를 사용한다.
+    """
+
+    items = list(detections)
+    iiac_centers = []
+    for class_name, (x1, y1, x2, y2) in items:
+        if str(class_name).strip().casefold().startswith("iiac"):
+            iiac_centers.append(((x1 + x2) / 2.0, (y1 + y2) / 2.0))
+
+    workers: set[int] = set()
+    for index, (class_name, (x1, y1, x2, y2)) in enumerate(items):
+        if str(class_name).strip().casefold() != "person":
+            continue
+        if any(x1 <= cx <= x2 and y1 <= cy <= y2 for cx, cy in iiac_centers):
+            workers.add(index)
+    return workers
 
 
 def annotation_scale(frame: np.ndarray, max_width: int = DISPLAY_MAX_WIDTH) -> float:
@@ -62,7 +85,16 @@ def draw_boxes(
     label_offset = max(8, round(8 * scale))
     minimum_baseline = max(24, round(24 * scale))
 
-    for box in boxes:
+    box_list = list(boxes)
+    detections = []
+    for box in box_list:
+        class_id = int(box.cls[0])
+        detections.append(
+            (str(names.get(class_id, class_id)), tuple(map(float, box.xyxy[0])))
+        )
+    worker_indexes = worker_person_indexes(detections)
+
+    for index, box in enumerate(box_list):
         x1, y1, x2, y2 = map(int, box.xyxy[0])
         class_id = int(box.cls[0])
         confidence = float(box.conf[0])
@@ -77,7 +109,8 @@ def draw_boxes(
             except (TypeError, ValueError, IndexError, RuntimeError):
                 track_id = None
         track_label = f" #{track_id}" if track_id is not None else ""
-        label = f"{names.get(class_id, class_id)}{track_label} {confidence:.2f}"
+        class_label = "woker" if index in worker_indexes else names.get(class_id, class_id)
+        label = f"{class_label}{track_label} {confidence:.2f}"
         cv2.rectangle(
             annotated,
             (x1, y1),
