@@ -234,6 +234,33 @@ def add_archive_datasets(archive_files, records, selected):
     return _dataset_ui_result(records or [], selected or [], message)
 
 
+def add_roboflow_dataset(universe_url, records, selected):
+    yield _dataset_ui_result(
+        records or [],
+        selected or [],
+        "⏳ Roboflow 데이터셋을 다운로드하고 검사하는 중입니다...",
+    )
+    try:
+        records, added, version = dataset_importer.download_roboflow_universe(
+            universe_url,
+            records,
+        )
+        selected = _valid_dataset_selection(records, selected)
+        selected_keys = {str(path).casefold() for path in selected}
+        for record in added:
+            key = str(record["yaml"]).casefold()
+            if key not in selected_keys:
+                selected.append(record["yaml"])
+                selected_keys.add(key)
+        message = (
+            f"✅ Roboflow v{version} 데이터셋을 다운로드·검사하고 등록했습니다: "
+            + ", ".join(record["name"] for record in added)
+        )
+    except dataset_importer.DatasetImportError as exc:
+        message = f"❌ Roboflow 다운로드 실패\n\n{exc}"
+    yield _dataset_ui_result(records or [], selected or [], message)
+
+
 def refresh_datasets(records, selected):
     records, errors = dataset_importer.refresh_registry(records)
     message = f"✅ 등록된 데이터셋 {len(records)}개를 다시 검사했습니다."
@@ -671,6 +698,27 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
             ]
             dataset_registry_state = gr.State(value=initial_dataset_records)
 
+            with gr.Group():
+                gr.Markdown("#### Roboflow Universe에서 바로 다운로드")
+                roboflow_universe_url = gr.Textbox(
+                    label="Roboflow Universe 데이터셋 URL",
+                    placeholder=(
+                        "https://universe.roboflow.com/workspace/project "
+                        "또는 .../dataset/4"
+                    ),
+                )
+                roboflow_dataset_add = gr.Button(
+                    "YOLO26 데이터셋 다운로드 후 등록",
+                    variant="primary",
+                )
+                gr.Markdown(
+                    "> 프로젝트 URL은 최신 버전을 자동 선택합니다. `.env`의 "
+                    "`ROBOFLOW_API_KEY`를 사용하며 다운로드 결과는 "
+                    "`dataset/external/roboflow/`에 저장됩니다."
+                )
+
+            gr.Markdown("#### 로컬 ZIP에서 등록")
+
             dataset_archives = gr.File(
                 label="YOLO 데이터셋 ZIP 업로드 (여러 개 가능)",
                 file_count="multiple",
@@ -801,10 +849,11 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
                 )
 
             device_radio = gr.Radio(
-                choices=["auto", "cpu", "0"],
-                value="auto",
+                choices=["auto", "mps", "cpu", "0"],
+                value="mps",
                 label="Device",
-                info="auto: GPU 있으면 자동 사용 / cpu: CPU 강제 (느림) / 0: 첫 번째 GPU 지정",
+                info="mps: Apple Silicon GPU / auto: CUDA GPU가 없으면 CPU / "
+                     "cpu: CPU 강제 (느림) / 0: 첫 번째 CUDA GPU",
             )
 
             with gr.Row():
@@ -1246,6 +1295,24 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
         add_archive_datasets,
         inputs=[
             dataset_archives,
+            dataset_registry_state,
+            training_dataset_select,
+        ],
+        outputs=dataset_ui_outputs,
+    )
+    roboflow_dataset_add.click(
+        add_roboflow_dataset,
+        inputs=[
+            roboflow_universe_url,
+            dataset_registry_state,
+            training_dataset_select,
+        ],
+        outputs=dataset_ui_outputs,
+    )
+    roboflow_universe_url.submit(
+        add_roboflow_dataset,
+        inputs=[
+            roboflow_universe_url,
             dataset_registry_state,
             training_dataset_select,
         ],

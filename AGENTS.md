@@ -174,7 +174,8 @@ cls_ids = results[0].boxes.cls.cpu().numpy().astype(int)
 **파일**: `pipeline/dataset_importer.py`
 
 - `dataset/imported/` 같은 고정 폴더에는 의존하지 않는다.
-- 외부 YOLO 데이터셋은 폴더 구조 유실을 막기 위해 ZIP 업로드만 사용하며 여러 ZIP을 한 번에 등록할 수 있다. ZIP은 경로 탈출, 파일 수, 압축 해제 크기를 검사한 뒤 `dataset/external/`에 안전하게 푼다.
+- 외부 YOLO 데이터셋은 ZIP 업로드 또는 Roboflow Universe URL로 등록한다. 여러 ZIP을 한 번에 등록할 수 있으며 ZIP은 경로 탈출, 파일 수, 압축 해제 크기를 검사한 뒤 `dataset/external/`에 안전하게 푼다.
+- Roboflow Universe 프로젝트 URL은 `.env`의 `ROBOFLOW_API_KEY`와 `roboflow` 패키지를 사용해 YOLO26 형식으로 내려받는다. URL에 `/dataset/<버전>`이 있으면 해당 버전, 프로젝트 URL만 있으면 최신 버전을 선택하며 결과는 `dataset/external/roboflow/`에 보존한 뒤 즉시 검사·등록한다.
 - 등록 시 `data.yaml`/`dataset.yaml`의 train·val 경로, names/nc, 이미지 존재 여부, 라벨 열 수, 클래스 ID, 정규화 bbox 좌표를 검사한다. 라벨 없음/빈 라벨은 배경 이미지로 집계하고 오류로 보지 않는다.
 - 등록 목록의 체크박스로 여러 데이터셋을 한 학습에 적용한다. 클래스 구성이 같으면 절대 이미지 경로 목록을 가진 `dataset/.combined/combined-<hash>.yaml`로 직접 결합한다.
 - 클래스 이름/ID 순서가 다르면 선택 순서 기준의 통합 클래스 목록을 만들고 `dataset/.combined/staged-<hash>/`에 학습용 데이터셋을 구성한다. 원본 라벨은 바꾸지 않고 staged 라벨의 class ID만 재작성한다.

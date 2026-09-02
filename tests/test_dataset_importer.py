@@ -45,6 +45,73 @@ def _write_dataset(
 
 
 class DatasetImporterTests(unittest.TestCase):
+    def test_parse_roboflow_project_and_version_urls(self):
+        self.assertEqual(
+            dataset_importer.parse_roboflow_universe_url(
+                "https://universe.roboflow.com/example/team-project"
+            ),
+            ("example", "team-project", None),
+        )
+        self.assertEqual(
+            dataset_importer.parse_roboflow_universe_url(
+                "https://universe.roboflow.com/example/team-project/dataset/7"
+            ),
+            ("example", "team-project", 7),
+        )
+
+    def test_parse_roboflow_url_rejects_other_hosts(self):
+        with self.assertRaisesRegex(
+            dataset_importer.DatasetImportError,
+            "universe.roboflow.com",
+        ):
+            dataset_importer.parse_roboflow_universe_url(
+                "https://example.com/workspace/project"
+            )
+
+    def test_roboflow_project_url_downloads_latest_and_registers(self):
+        class FakeDownload:
+            def __init__(self, location):
+                self.location = location
+
+        class FakeVersion:
+            def __init__(self, number):
+                self.version = str(number)
+
+            def download(self, model_format, location, overwrite=False):
+                self.model_format = model_format
+                self.overwrite = overwrite
+                _write_dataset(Path(location))
+                return FakeDownload(location)
+
+        class FakeProject:
+            def __init__(self):
+                self.items = [FakeVersion(1), FakeVersion(4), FakeVersion(2)]
+
+            def versions(self):
+                return self.items
+
+            def version(self, number):
+                return next(item for item in self.items if int(item.version) == number)
+
+        with tempfile.TemporaryDirectory() as directory:
+            project = FakeProject()
+            with mock.patch.object(
+                dataset_importer,
+                "_roboflow_project",
+                return_value=project,
+            ):
+                records, added, version = dataset_importer.download_roboflow_universe(
+                    "https://universe.roboflow.com/example/safety-cones",
+                    download_root=Path(directory),
+                    api_key="secret",
+                )
+
+            self.assertEqual(version, 4)
+            self.assertEqual(len(records), 1)
+            self.assertEqual(len(added), 1)
+            self.assertIn("v4", added[0]["source"])
+            self.assertTrue(Path(added[0]["yaml"]).is_file())
+
     def test_validate_roboflow_style_dataset(self):
         with tempfile.TemporaryDirectory() as directory:
             yaml_path = _write_dataset(Path(directory) / "안전 라바콘")
