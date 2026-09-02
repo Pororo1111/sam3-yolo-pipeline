@@ -338,7 +338,7 @@ def run_train(
     epochs,
     imgsz,
     batch,
-    lr0,
+    patience,
     device,
     name,
     base_model,
@@ -348,7 +348,7 @@ def run_train(
         epochs,
         imgsz,
         batch,
-        lr0,
+        patience,
         device,
         name,
         base_model,
@@ -841,11 +841,11 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
                     info="한 번에 처리할 이미지 수. GPU VRAM 8GB 이하면 8로 낮추세요. "
                          "CUDA OOM 오류 발생 시 가장 먼저 줄일 값",
                 )
-                lr0_slider = gr.Slider(
-                    minimum=0.0001, maximum=0.1, value=0.01, step=0.0001,
-                    label="Learning Rate (lr0)",
-                    info="초기 학습률. ultralytics 기본값 0.01. "
-                         "학습이 불안정하거나 loss가 튀면 0.001~0.005로 낮추세요",
+                patience_slider = gr.Slider(
+                    minimum=1, maximum=100, value=10, step=1,
+                    label="Early Stopping Patience",
+                    info="검증 성능이 연속으로 개선되지 않아도 기다릴 epoch 수. "
+                         "10이면 10 epoch 연속 개선이 없을 때 자동 종료합니다.",
                 )
 
             device_radio = gr.Radio(
@@ -864,7 +864,7 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
 
             train_event = train_start_btn.click(
                 fn=run_train,
-                inputs=[epochs_slider, imgsz_slider, batch_slider, lr0_slider, device_radio,
+                inputs=[epochs_slider, imgsz_slider, batch_slider, patience_slider, device_radio,
                         train_name, base_model_dd, training_dataset_select],
                 outputs=train_log,
             )

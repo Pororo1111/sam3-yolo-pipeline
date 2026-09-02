@@ -311,7 +311,7 @@ class DatasetImporterTests(unittest.TestCase):
                 1,
                 320,
                 1,
-                0.01,
+                10,
                 "cpu",
                 dataset_yamls=[],
             )

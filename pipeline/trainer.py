@@ -32,7 +32,7 @@ def stop():
     _stop_event.set()
 
 
-def train(epochs: int, imgsz: int, batch: int, lr0: float, device: str,
+def train(epochs: int, imgsz: int, batch: int, patience: int, device: str,
           name: str = "train", base_model: str = "",
           dataset_yamls: list[str] | None = None):
     _stop_event.clear()
@@ -143,7 +143,7 @@ def train(epochs: int, imgsz: int, batch: int, lr0: float, device: str,
     header = (
         f"학습 시작\n"
         f"  base={base_desc}  name={run_name}\n"
-        f"  epochs={epochs}  imgsz={imgsz}  batch={batch}  lr0={lr0}  device={device}\n"
+        f"  epochs={epochs}  patience={patience}  imgsz={imgsz}  batch={batch}  device={device}\n"
         f"  dataset={dataset_description}\n"
         f"  data={training_yaml}\n"
         + "─" * 60 + "\n"
@@ -160,9 +160,9 @@ def train(epochs: int, imgsz: int, batch: int, lr0: float, device: str,
             result_box[0] = model.train(
                 data=str(training_yaml),
                 epochs=epochs,
+                patience=patience,
                 imgsz=imgsz,
                 batch=batch,
-                lr0=lr0,
                 device=device if device != "auto" else None,
                 project=str(_PROJECT),
                 name=run_name,
