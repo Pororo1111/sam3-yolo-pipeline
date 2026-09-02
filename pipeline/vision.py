@@ -33,24 +33,42 @@ def class_color(class_id: int) -> Color:
     return _PALETTE[class_id % len(_PALETTE)]
 
 
+def inference_class_ids(names: Mapping) -> list[int]:
+    """추론 결과에 포함할 클래스 ID를 반환한다.
+
+    ``NO-`` 접두어 클래스는 PPE 미착용 보조 라벨이므로 추론·침입 감시에서
+    제외한다. 대소문자와 이름 앞뒤 공백은 무시한다.
+    """
+
+    return sorted(
+        int(class_id)
+        for class_id, class_name in names.items()
+        if not str(class_name).strip().casefold().startswith("no-")
+    )
+
+
 def worker_person_indexes(detections: Iterable[Detection]) -> set[int]:
-    """``person`` 안에 ``iiac...`` 검출이 있으면 해당 person 인덱스를 반환한다.
+    """보호구를 착용한 ``person`` 인덱스를 반환한다.
 
     보호구 bbox 전체가 사람 bbox 안에 꼭 들어맞지 않는 실제 검출 오차를 고려해
-    ``iiac`` 검출 bbox의 중심점 포함 여부를 사용한다.
+    ``iiac...`` 또는 ``Hardhat`` 검출 bbox의 중심점 포함 여부를 사용한다.
     """
 
     items = list(detections)
-    iiac_centers = []
+    equipment_centers = []
     for class_name, (x1, y1, x2, y2) in items:
-        if str(class_name).strip().casefold().startswith("iiac"):
-            iiac_centers.append(((x1 + x2) / 2.0, (y1 + y2) / 2.0))
+        normalized_name = str(class_name).strip().casefold()
+        if normalized_name.startswith("iiac") or normalized_name == "hardhat":
+            equipment_centers.append(((x1 + x2) / 2.0, (y1 + y2) / 2.0))
 
     workers: set[int] = set()
     for index, (class_name, (x1, y1, x2, y2)) in enumerate(items):
         if str(class_name).strip().casefold() != "person":
             continue
-        if any(x1 <= cx <= x2 and y1 <= cy <= y2 for cx, cy in iiac_centers):
+        if any(
+            x1 <= cx <= x2 and y1 <= cy <= y2
+            for cx, cy in equipment_centers
+        ):
             workers.add(index)
     return workers
 
@@ -109,7 +127,7 @@ def draw_boxes(
             except (TypeError, ValueError, IndexError, RuntimeError):
                 track_id = None
         track_label = f" #{track_id}" if track_id is not None else ""
-        class_label = "woker" if index in worker_indexes else names.get(class_id, class_id)
+        class_label = "worker" if index in worker_indexes else names.get(class_id, class_id)
         label = f"{class_label}{track_label} {confidence:.2f}"
         cv2.rectangle(
             annotated,

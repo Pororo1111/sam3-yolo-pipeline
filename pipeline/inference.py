@@ -51,9 +51,12 @@ def predict(
         return
 
     names = model.names or {}
+    class_ids = vision.inference_class_ids(names)
 
     if source_type == media.SOURCE_IMAGES:
-        yield from _predict_folder(model, names, folder_files, float(conf))
+        yield from _predict_folder(
+            model, names, class_ids, folder_files, float(conf)
+        )
         return
 
     try:
@@ -67,6 +70,7 @@ def predict(
             yield from _predict_video(
                 model,
                 names,
+                class_ids,
                 capture,
                 float(conf),
                 max(1, int(infer_every)),
@@ -79,7 +83,14 @@ def predict(
         yield None, f"추론 오류: {exc}"
 
 
-def _predict_video(model, names: dict, capture, conf: float, infer_every: int):
+def _predict_video(
+    model,
+    names: dict,
+    class_ids: list[int],
+    capture,
+    conf: float,
+    infer_every: int,
+):
     yield None, "추론 시작..."
 
     frame_index = 0
@@ -95,7 +106,12 @@ def _predict_video(model, names: dict, capture, conf: float, infer_every: int):
 
         if frame_index % infer_every == 0:
             started_at = time.perf_counter()
-            results = model(frame_bgr, conf=conf, verbose=False)
+            results = model(
+                frame_bgr,
+                conf=conf,
+                classes=class_ids,
+                verbose=False,
+            )
             inference_ms = (time.perf_counter() - started_at) * 1000
             last_boxes = results[0].boxes if results[0].boxes is not None else None
             last_detection_count = (
@@ -118,7 +134,13 @@ def _predict_video(model, names: dict, capture, conf: float, infer_every: int):
     yield None, f"추론 {prefix} — 총 {frame_index}프레임 처리"
 
 
-def _predict_folder(model, names: dict, folder_files, conf: float):
+def _predict_folder(
+    model,
+    names: dict,
+    class_ids: list[int],
+    folder_files,
+    conf: float,
+):
     images = media.filter_image_paths(folder_files)
     if not images:
         yield None, "업로드된 이미지가 없습니다. 이미지 폴더를 업로드하세요."
@@ -137,7 +159,12 @@ def _predict_folder(model, names: dict, folder_files, conf: float):
                 continue
 
             started_at = time.perf_counter()
-            results = model(frame_bgr, conf=conf, verbose=False)
+            results = model(
+                frame_bgr,
+                conf=conf,
+                classes=class_ids,
+                verbose=False,
+            )
             inference_ms = (time.perf_counter() - started_at) * 1000
             boxes = results[0].boxes if results[0].boxes is not None else None
             detection_count = len(boxes) if boxes is not None else 0

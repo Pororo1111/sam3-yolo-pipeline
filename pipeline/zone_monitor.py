@@ -146,7 +146,7 @@ def _observations_from_boxes(boxes, names: dict, frame_shape) -> list[TrackObser
             track_id=item.track_id,
             class_id=item.class_id,
             confidence=item.confidence,
-            class_name="woker" if index in worker_indexes else item.class_name,
+            class_name="worker" if index in worker_indexes else item.class_name,
             xyxy=item.xyxy,
         )
         for index, item in enumerate(observations)
@@ -785,12 +785,18 @@ def _is_current(runtime: ZoneRuntime, run_id: str, stop_event: threading.Event) 
         )
 
 
-def _track_frame(model, frame_bgr: np.ndarray, visible_conf: float):
+def _track_frame(
+    model,
+    frame_bgr: np.ndarray,
+    visible_conf: float,
+    class_ids: list[int],
+):
     results = model.track(
         frame_bgr,
         persist=True,
         tracker=TRACKER_CONFIG,
         conf=min(_TRACK_CONFIDENCE, max(0.01, float(visible_conf))),
+        classes=class_ids,
         verbose=False,
     )
     return results[0].boxes if results and results[0].boxes is not None else None
@@ -853,6 +859,7 @@ def stream(
         return
 
     names = model.names or {}
+    class_ids = vision.inference_class_ids(names)
     interval = max(1, int(infer_every))
 
     if source_type == media.SOURCE_IMAGES:
@@ -863,6 +870,7 @@ def stream(
                 stop_event,
                 model,
                 names,
+                class_ids,
                 folder_files,
                 float(conf),
                 interval,
@@ -902,7 +910,12 @@ def stream(
 
                 effective_interval = 1
                 if frame_index % effective_interval == 0:
-                    boxes = _track_frame(model, frame_bgr, float(conf))
+                    boxes = _track_frame(
+                        model,
+                        frame_bgr,
+                        float(conf),
+                        class_ids,
+                    )
                     observations = _observations_from_boxes(
                         boxes,
                         names,
@@ -972,6 +985,7 @@ def _stream_folder(
     stop_event: threading.Event,
     model,
     names: dict,
+    class_ids: list[int],
     folder_files,
     conf: float,
     infer_every: int,
@@ -998,7 +1012,7 @@ def _stream_folder(
                 continue
             effective_interval = 1
             if frame_index % effective_interval == 0:
-                boxes = _track_frame(model, frame_bgr, conf)
+                boxes = _track_frame(model, frame_bgr, conf, class_ids)
                 observations = _observations_from_boxes(boxes, names, frame_bgr.shape)
                 if not _update_tracking_and_latest(
                     runtime,

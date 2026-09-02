@@ -10,6 +10,16 @@ from pipeline import vision
 
 
 class VisionTests(unittest.TestCase):
+    def test_inference_class_ids_excludes_no_prefix(self):
+        names = {
+            0: "Person",
+            1: "NO-Hardhat",
+            2: "iiac_vest",
+            3: " no-mask ",
+        }
+
+        self.assertEqual(vision.inference_class_ids(names), [0, 2])
+
     def test_person_containing_iiac_detection_is_displayed_as_worker(self):
         frame = np.zeros((100, 100, 3), dtype=np.uint8)
         boxes = [
@@ -30,8 +40,24 @@ class VisionTests(unittest.TestCase):
         with patch("pipeline.vision.cv2.putText") as put_text:
             vision.draw_boxes(frame, boxes, {0: "Person", 1: "iiac_helmet"})
 
-        self.assertTrue(put_text.call_args_list[0].args[1].startswith("woker "))
+        self.assertTrue(put_text.call_args_list[0].args[1].startswith("worker "))
         self.assertTrue(put_text.call_args_list[1].args[1].startswith("iiac_helmet "))
+
+    def test_person_containing_hardhat_is_displayed_as_worker(self):
+        detections = [
+            ("Person", (0.1, 0.1, 0.9, 1.0)),
+            ("Hardhat", (0.35, 0.1, 0.6, 0.3)),
+        ]
+
+        self.assertEqual(vision.worker_person_indexes(detections), {0})
+
+    def test_no_hardhat_does_not_mark_person_as_worker(self):
+        detections = [
+            ("Person", (0.1, 0.1, 0.9, 1.0)),
+            ("NO-Hardhat", (0.35, 0.1, 0.6, 0.3)),
+        ]
+
+        self.assertEqual(vision.worker_person_indexes(detections), set())
 
     def test_person_without_contained_iiac_keeps_original_label(self):
         detections = [
