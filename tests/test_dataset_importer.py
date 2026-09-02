@@ -45,6 +45,11 @@ def _write_dataset(
 
 
 class DatasetImporterTests(unittest.TestCase):
+    def test_trainer_uses_fast_mps_data_loading_options(self):
+        self.assertEqual(trainer._data_loading_options("mps"), (4, "ram"))
+        self.assertEqual(trainer._data_loading_options("cpu"), (0, False))
+        self.assertEqual(trainer._data_loading_options("auto"), (0, False))
+
     def test_parse_roboflow_project_and_version_urls(self):
         self.assertEqual(
             dataset_importer.parse_roboflow_universe_url(

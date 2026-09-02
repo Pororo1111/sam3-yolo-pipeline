@@ -32,6 +32,14 @@ def stop():
     _stop_event.set()
 
 
+def _data_loading_options(device: str) -> tuple[int, str | bool]:
+    """MPS에서는 병렬 로딩과 RAM 캐시를 쓰고 다른 장치는 기존 설정을 유지한다."""
+
+    if device == "mps":
+        return 4, "ram"
+    return 0, False
+
+
 def train(epochs: int, imgsz: int, batch: int, patience: int, device: str,
           name: str = "train", base_model: str = "",
           dataset_yamls: list[str] | None = None):
@@ -139,11 +147,13 @@ def train(epochs: int, imgsz: int, batch: int, patience: int, device: str,
     model.add_callback("on_train_end",       on_train_end)
     model.add_callback("on_val_end",         on_val_end)
 
+    workers, cache = _data_loading_options(device)
     base_desc = f"{base_path.name} (이어학습)" if base else f"{base_path.name} (처음부터)"
     header = (
         f"학습 시작\n"
         f"  base={base_desc}  name={run_name}\n"
         f"  epochs={epochs}  patience={patience}  imgsz={imgsz}  batch={batch}  device={device}\n"
+        f"  workers={workers}  cache={cache}\n"
         f"  dataset={dataset_description}\n"
         f"  data={training_yaml}\n"
         + "─" * 60 + "\n"
@@ -168,7 +178,8 @@ def train(epochs: int, imgsz: int, batch: int, patience: int, device: str,
                 name=run_name,
                 verbose=True,
                 plots=True,
-                workers=0,
+                workers=workers,
+                cache=cache,
             )
         except Exception as e:
             exc_box[0] = e
