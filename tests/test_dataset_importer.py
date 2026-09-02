@@ -45,8 +45,8 @@ def _write_dataset(
 
 
 class DatasetImporterTests(unittest.TestCase):
-    def test_trainer_uses_fast_mps_data_loading_options(self):
-        self.assertEqual(trainer._data_loading_options("mps"), (4, "ram"))
+    def test_trainer_uses_stable_data_loading_options(self):
+        self.assertEqual(trainer._data_loading_options("mps"), (0, False))
         self.assertEqual(trainer._data_loading_options("cpu"), (0, False))
         self.assertEqual(trainer._data_loading_options("auto"), (0, False))
 

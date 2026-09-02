@@ -33,10 +33,8 @@ def stop():
 
 
 def _data_loading_options(device: str) -> tuple[int, str | bool]:
-    """MPS에서는 병렬 로딩과 RAM 캐시를 쓰고 다른 장치는 기존 설정을 유지한다."""
+    """플랫폼과 무관하게 안정적인 단일 프로세스 로딩 설정을 사용한다."""
 
-    if device == "mps":
-        return 4, "ram"
     return 0, False
 
 
