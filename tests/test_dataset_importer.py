@@ -50,6 +50,22 @@ class DatasetImporterTests(unittest.TestCase):
         self.assertEqual(trainer._data_loading_options("cpu"), (0, False))
         self.assertEqual(trainer._data_loading_options("auto"), (0, False))
 
+    def test_training_metrics_are_restored_from_results_csv(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = Path(directory)
+            (run_dir / "results.csv").write_text(
+                "epoch,train/box_loss,train/cls_loss,metrics/precision(B),"
+                "metrics/recall(B),metrics/mAP50(B),metrics/mAP50-95(B)\n"
+                "3,1.25,0.75,0.8,0.7,0.6,0.4\n",
+                encoding="utf-8",
+            )
+
+            metrics = trainer._metrics_from_results(str(run_dir))
+
+            self.assertEqual(metrics["epoch"], 3)
+            self.assertEqual(metrics["precision"], 0.8)
+            self.assertEqual(metrics["map50_95"], 0.4)
+
     def test_parse_roboflow_project_and_version_urls(self):
         self.assertEqual(
             dataset_importer.parse_roboflow_universe_url(
@@ -116,6 +132,37 @@ class DatasetImporterTests(unittest.TestCase):
             self.assertEqual(len(added), 1)
             self.assertIn("v4", added[0]["source"])
             self.assertTrue(Path(added[0]["yaml"]).is_file())
+
+    def test_downloaded_roboflow_datasets_are_listed_and_registered_on_selection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "roboflow"
+            yaml_path = _write_dataset(root / "workspace-project-v3-yolo26")
+            with mock.patch.object(dataset_importer, "ROBOFLOW_DATASETS_DIR", root):
+                downloaded = dataset_importer.list_downloaded_roboflow()
+                records, record = dataset_importer.register_downloaded_roboflow(
+                    downloaded[0]["yaml"]
+                )
+
+            self.assertEqual(len(downloaded), 1)
+            self.assertEqual(Path(downloaded[0]["yaml"]), yaml_path.resolve())
+            self.assertEqual(len(records), 1)
+            self.assertEqual(record["classes"], ["cone"])
+            self.assertIn("Roboflow 다운로드", record["source"])
+
+    def test_downloaded_roboflow_registration_rejects_paths_outside_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            outside = _write_dataset(root / "outside")
+            with mock.patch.object(
+                dataset_importer,
+                "ROBOFLOW_DATASETS_DIR",
+                root / "roboflow",
+            ):
+                with self.assertRaisesRegex(
+                    dataset_importer.DatasetImportError,
+                    "다운로드 폴더",
+                ):
+                    dataset_importer.register_downloaded_roboflow(str(outside))
 
     def test_validate_roboflow_style_dataset(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -311,16 +358,28 @@ class DatasetImporterTests(unittest.TestCase):
             self.assertFalse((root / "outside.txt").exists())
 
     def test_trainer_rejects_an_explicit_empty_selection(self):
-        outputs = list(
-            trainer.train(
-                1,
-                320,
-                1,
-                10,
-                "cpu",
-                dataset_yamls=[],
-            )
-        )
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            with (
+                mock.patch.object(trainer, "_RUNTIME_DIR", runtime),
+                mock.patch.object(trainer, "_STATE_PATH", runtime / "state.json"),
+                mock.patch.object(trainer, "_LOG_PATH", runtime / "train.log"),
+            ):
+                outputs = list(
+                    trainer.train(
+                        1,
+                        320,
+                        1,
+                        10,
+                        "cpu",
+                        dataset_yamls=[],
+                    )
+                )
+
+                snapshot = trainer.training_snapshot()
+
+            self.assertEqual(snapshot["status"], "error")
+            self.assertFalse(snapshot["active"])
 
         self.assertEqual(len(outputs), 2)
         self.assertIn("통합 준비", outputs[0])

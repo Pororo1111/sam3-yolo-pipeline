@@ -11,6 +11,7 @@ import tempfile
 import threading
 import uuid
 import zipfile
+from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 from urllib.parse import unquote, urlparse
@@ -506,6 +507,71 @@ def discover_dataset_yamls(folder: str | os.PathLike[str]) -> list[Path]:
             "폴더에서 data.yaml 또는 dataset.yaml을 찾을 수 없습니다."
         )
     return unique
+
+
+def list_downloaded_roboflow() -> list[dict[str, str]]:
+    """이미 내려받은 Roboflow 데이터셋을 검증 없이 빠르게 나열한다.
+
+    실제 데이터셋 검증은 사용자가 항목을 선택해 등록할 때 수행한다. 다운로드가
+    끝난 폴더만 노출하며, 불완전한 폴더나 YAML이 없는 폴더는 목록에서 제외한다.
+    """
+    root = ROBOFLOW_DATASETS_DIR.resolve()
+    if not root.is_dir():
+        return []
+
+    items: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for folder in sorted(
+        (path for path in root.iterdir() if path.is_dir()),
+        key=lambda path: _natural_key(path.name),
+    ):
+        if not folder.resolve().is_relative_to(root):
+            continue
+        try:
+            yaml_paths = discover_dataset_yamls(folder)
+        except DatasetImportError:
+            continue
+        for yaml_path in yaml_paths:
+            resolved_yaml = yaml_path.resolve()
+            if not resolved_yaml.is_relative_to(root):
+                continue
+            key = str(resolved_yaml).casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            modified = datetime.fromtimestamp(yaml_path.stat().st_mtime).strftime(
+                "%Y-%m-%d %H:%M"
+            )
+            relative = resolved_yaml.relative_to(root)
+            items.append(
+                {
+                    "label": f"{folder.name} · {modified}",
+                    "yaml": str(resolved_yaml),
+                    "relative": relative.as_posix(),
+                }
+            )
+    return items
+
+
+def register_downloaded_roboflow(
+    yaml_file: str,
+    records: list[dict[str, Any]] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """로컬 Roboflow 다운로드 목록에서 선택한 YAML을 검사해 등록한다."""
+    raw_path = str(yaml_file or "").strip()
+    if not raw_path:
+        raise DatasetImportError("등록할 Roboflow 데이터셋을 선택하세요.")
+
+    yaml_path = Path(raw_path).resolve()
+    root = ROBOFLOW_DATASETS_DIR.resolve()
+    if not yaml_path.is_relative_to(root) or yaml_path.name not in _YAML_NAMES:
+        raise DatasetImportError("Roboflow 다운로드 폴더의 데이터셋만 등록할 수 있습니다.")
+    if not yaml_path.is_file():
+        raise DatasetImportError(f"데이터셋 YAML을 찾을 수 없습니다: {yaml_path}")
+
+    record = validate_dataset(yaml_path)
+    record["source"] = f"Roboflow 다운로드 · {yaml_path.parent.name}"
+    return _merge_records(records, [record]), record
 
 
 def _merge_records(

@@ -215,6 +215,13 @@ def _dataset_ui_result(records, selected, message):
     )
 
 
+def _downloaded_roboflow_choices():
+    return [
+        (item["label"], item["yaml"])
+        for item in dataset_importer.list_downloaded_roboflow()
+    ]
+
+
 def add_archive_datasets(archive_files, records, selected):
     try:
         records, added = dataset_importer.register_archives(archive_files, records)
@@ -239,7 +246,7 @@ def add_roboflow_dataset(universe_url, records, selected):
         records or [],
         selected or [],
         "⏳ Roboflow 데이터셋을 다운로드하고 검사하는 중입니다...",
-    )
+    ) + (gr.update(),)
     try:
         records, added, version = dataset_importer.download_roboflow_universe(
             universe_url,
@@ -258,7 +265,46 @@ def add_roboflow_dataset(universe_url, records, selected):
         )
     except dataset_importer.DatasetImportError as exc:
         message = f"❌ Roboflow 다운로드 실패\n\n{exc}"
-    yield _dataset_ui_result(records or [], selected or [], message)
+    yield _dataset_ui_result(records or [], selected or [], message) + (
+        gr.update(choices=_downloaded_roboflow_choices(), value=None),
+    )
+
+
+def register_downloaded_roboflow(yaml_file, records, selected):
+    """다운로드 목록 클릭 즉시 해당 데이터셋을 검사·등록한다."""
+    loading = gr.update(visible=True)
+    hidden = gr.update(visible=False)
+    yield _dataset_ui_result(
+        records or [],
+        selected or [],
+        "⏳ 선택한 Roboflow 데이터셋을 검사하고 등록하는 중입니다...",
+    ) + (gr.update(), loading)
+    try:
+        records, added = dataset_importer.register_downloaded_roboflow(
+            yaml_file,
+            records,
+        )
+        selected = _valid_dataset_selection(records, selected)
+        if str(added["yaml"]).casefold() not in {
+            str(path).casefold() for path in selected
+        }:
+            selected.append(added["yaml"])
+        message = f"✅ Roboflow 데이터셋을 검사하고 등록했습니다: {added['name']}"
+    except dataset_importer.DatasetImportError as exc:
+        message = f"❌ Roboflow 데이터셋 등록 실패\n\n{exc}"
+    yield _dataset_ui_result(records or [], selected or [], message) + (
+        gr.update(value=None), hidden,
+    )
+
+
+def refresh_downloaded_roboflow():
+    choices = _downloaded_roboflow_choices()
+    message = (
+        f"✅ 다운로드된 Roboflow 데이터셋 {len(choices)}개를 찾았습니다."
+        if choices
+        else "ℹ️ 다운로드된 Roboflow 데이터셋이 없습니다."
+    )
+    return gr.update(choices=choices, value=None), message
 
 
 def refresh_datasets(records, selected):
@@ -344,7 +390,7 @@ def run_train(
     base_model,
     dataset_yamls=None,
 ):
-    for text in trainer.train(
+    for _text in trainer.train(
         epochs,
         imgsz,
         batch,
@@ -354,8 +400,61 @@ def run_train(
         base_model,
         dataset_yamls,
     ):
-        escaped = _html.escape(text)
-        yield f'<div style="{_WRAP_STYLE}"><pre style="{_PRE_STYLE}">{escaped}</pre></div>'
+        yield training_panel_update()
+
+
+def _metric_percent(value):
+    return round(float(value) * 100, 2) if value is not None else None
+
+
+def training_panel_update():
+    snapshot = trainer.training_snapshot()
+    active = bool(snapshot.get("active"))
+    status = snapshot.get("status", "idle")
+    icon = {
+        "preparing": "⏳",
+        "running": "🟠",
+        "stopping": "⏹️",
+        "completed": "✅",
+        "stopped": "⏹️",
+        "error": "❌",
+        "interrupted": "⚠️",
+    }.get(status, "⚪")
+    details = [f"{icon} **{snapshot.get('message', '학습 대기 중')}**"]
+    if snapshot.get("run_name"):
+        details.append(f"모델: `{snapshot['run_name']}`")
+    if snapshot.get("run_dir"):
+        details.append(f"결과: `{snapshot['run_dir']}`")
+    if snapshot.get("started_at"):
+        details.append(f"시작: `{snapshot['started_at']}`")
+    status_markdown = "  \n".join(details)
+
+    log_text = snapshot.get("log") or "학습 로그가 아직 없습니다."
+    escaped = _html.escape(log_text)
+    log_html = f'<div style="{_WRAP_STYLE}"><pre style="{_PRE_STYLE}">{escaped}</pre></div>'
+    metrics = snapshot.get("metrics") or {}
+    epoch = metrics.get("epoch") or snapshot.get("current_epoch") or 0
+    return (
+        status_markdown,
+        log_html,
+        gr.update(
+            value="학습 진행 중" if active else "학습 시작",
+            interactive=not active,
+        ),
+        gr.update(interactive=active),
+        epoch,
+        _metric_percent(metrics.get("precision")),
+        _metric_percent(metrics.get("recall")),
+        _metric_percent(metrics.get("map50")),
+        _metric_percent(metrics.get("map50_95")),
+        metrics.get("box_loss"),
+        metrics.get("cls_loss"),
+    )
+
+
+def stop_train():
+    trainer.stop()
+    return training_panel_update()
 
 
 _CSS = (
@@ -384,6 +483,11 @@ _CSS = (
     ".sample-card button { min-height: 72px; border: 1px solid #d4d4d8 !important; "
     "background: #fff !important; color: #18181b !important; text-align: left; "
     "justify-content: flex-start; box-shadow: 0 1px 2px rgba(0,0,0,.06); }"
+    "@keyframes rf-spin { to { transform: rotate(360deg); } }"
+    ".rf-loading { display:flex;align-items:center;gap:10px;padding:10px 12px;"
+    "border-radius:8px;background:rgba(249,115,22,.12); }"
+    ".rf-spinner { width:20px;height:20px;border:3px solid rgba(249,115,22,.25);"
+    "border-top-color:#f97316;border-radius:50%;animation:rf-spin .8s linear infinite; }"
 )
 
 _webcam_choices, _webcam_value = webcams.refresh_webcam_dropdown()
@@ -738,6 +842,29 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
                     "`dataset/external/roboflow/`에 저장됩니다."
                 )
 
+            with gr.Group():
+                gr.Markdown("#### 다운로드된 Roboflow 데이터셋")
+                gr.Markdown(
+                    "항목을 클릭하면 데이터셋 전체를 검사한 뒤 등록하고, "
+                    "학습 데이터셋 선택에도 자동으로 추가합니다."
+                )
+                with gr.Row():
+                    roboflow_downloaded_select = gr.Radio(
+                        choices=_downloaded_roboflow_choices(),
+                        value=None,
+                        label="다운로드 목록 (클릭하여 등록)",
+                        scale=4,
+                    )
+                    roboflow_downloaded_refresh = gr.Button(
+                        "다운로드 목록 새로고침",
+                        scale=1,
+                    )
+                roboflow_register_loading = gr.HTML(
+                    '<div class="rf-loading"><span class="rf-spinner"></span>'
+                    "<span>데이터셋을 검사하고 등록하는 중입니다…</span></div>",
+                    visible=False,
+                )
+
             gr.Markdown("#### 로컬 ZIP에서 등록")
 
             dataset_archives = gr.File(
@@ -879,19 +1006,45 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
 
             with gr.Row():
                 train_start_btn = gr.Button("학습 시작", variant="primary")
-                train_stop_btn  = gr.Button("중지", variant="stop")
+                train_stop_btn  = gr.Button("중지", variant="stop", interactive=False)
+
+            train_runtime_status = gr.Markdown("⚪ **학습 대기 중**")
+            with gr.Row():
+                train_metric_epoch = gr.Number(label="완료 Epoch", interactive=False)
+                train_metric_precision = gr.Number(label="Precision (%)", interactive=False)
+                train_metric_recall = gr.Number(label="Recall (%)", interactive=False)
+                train_metric_map50 = gr.Number(label="mAP50 (%)", interactive=False)
+            with gr.Row():
+                train_metric_map = gr.Number(label="mAP50-95 (%)", interactive=False)
+                train_metric_box_loss = gr.Number(label="Train Box Loss", interactive=False)
+                train_metric_cls_loss = gr.Number(label="Train Class Loss", interactive=False)
 
             train_log = gr.HTML(label="학습 로그")
+            train_status_timer = gr.Timer(1.0, active=True)
+
+            train_ui_outputs = [
+                train_runtime_status,
+                train_log,
+                train_start_btn,
+                train_stop_btn,
+                train_metric_epoch,
+                train_metric_precision,
+                train_metric_recall,
+                train_metric_map50,
+                train_metric_map,
+                train_metric_box_loss,
+                train_metric_cls_loss,
+            ]
 
             train_event = train_start_btn.click(
                 fn=run_train,
                 inputs=[epochs_slider, imgsz_slider, batch_slider, patience_slider, device_radio,
                         train_name, base_model_dd, training_dataset_select],
-                outputs=train_log,
+                outputs=train_ui_outputs,
             )
             train_stop_btn.click(
-                fn=trainer.stop,
-                cancels=[train_event],
+                fn=stop_train,
+                outputs=train_ui_outputs,
             )
             base_model_refresh.click(
                 fn=refresh_base_model_dropdown,
@@ -1334,7 +1487,8 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
             dataset_registry_state,
             training_dataset_select,
         ],
-        outputs=dataset_ui_outputs,
+        outputs=dataset_ui_outputs + [roboflow_downloaded_select],
+        show_progress="full",
     )
     roboflow_universe_url.submit(
         add_roboflow_dataset,
@@ -1343,7 +1497,27 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
             dataset_registry_state,
             training_dataset_select,
         ],
-        outputs=dataset_ui_outputs,
+        outputs=dataset_ui_outputs + [roboflow_downloaded_select],
+        show_progress="full",
+    )
+    roboflow_downloaded_select.input(
+        register_downloaded_roboflow,
+        inputs=[
+            roboflow_downloaded_select,
+            dataset_registry_state,
+            training_dataset_select,
+        ],
+        outputs=dataset_ui_outputs + [
+            roboflow_downloaded_select,
+            roboflow_register_loading,
+        ],
+        show_progress="full",
+        concurrency_id="roboflow_register",
+        concurrency_limit=1,
+    )
+    roboflow_downloaded_refresh.click(
+        refresh_downloaded_roboflow,
+        outputs=[roboflow_downloaded_select, dataset_import_status],
     )
     dataset_refresh_btn.click(
         refresh_datasets,
@@ -1386,6 +1560,17 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
     panel_zone.select(refresh_model_dropdown, outputs=zm_model_path)
     # 학습 탭 진입 시 베이스 모델 목록도 자동 새로고침
     panel_train.select(refresh_base_model_dropdown, outputs=base_model_dd)
+    panel_train.select(training_panel_update, outputs=train_ui_outputs)
+    train_status_timer.tick(
+        training_panel_update,
+        outputs=train_ui_outputs,
+        show_progress="hidden",
+    )
+    demo.load(
+        training_panel_update,
+        outputs=train_ui_outputs,
+        show_progress="hidden",
+    )
 
 
 if __name__ == "__main__":
