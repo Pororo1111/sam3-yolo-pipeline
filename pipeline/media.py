@@ -62,7 +62,13 @@ class YouTubeStreamResolver:
                 return cached[1]
 
         options = {
-            "format": "best[ext=mp4][protocol^=http]/best[protocol^=http]/best",
+            # 프레임 처리에는 음성이 필요 없다. 영상/음성이 분리된 YouTube
+            # 영상에서도 열 수 있도록 영상 전용 MP4를 우선 선택한다.
+            "format": (
+                "bestvideo[ext=mp4][protocol^=http]/"
+                "bestvideo[protocol^=http]/bestvideo/"
+                "best[ext=mp4][protocol^=http]/best[protocol^=http]/best"
+            ),
             "noplaylist": True,
             "quiet": True,
             "no_warnings": True,
