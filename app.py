@@ -354,8 +354,8 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
 
             with gr.Row():
                 source_type = gr.Radio(
-                    choices=["YouTube URL", "웹캠", "비디오 파일", "이미지 폴더"],
-                    value="YouTube URL",
+                    choices=["웹캠", "YouTube URL", "비디오 파일", "이미지 폴더"],
+                    value="웹캠",
                     label="소스",
                 )
                 capture_fps = gr.Slider(
@@ -368,13 +368,14 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
                 placeholder="https://www.youtube.com/watch?v=...",
                 label="YouTube URL",
                 elem_id="tab1_youtube_url",
+                elem_classes=["src-hidden"],
             )
-            with gr.Row(elem_id="tab1_youtube_sample_row"):
+            with gr.Row(elem_id="tab1_youtube_sample_row", elem_classes=["src-hidden"]):
                 youtube_sample_btn = gr.Button(
                     "샘플 YouTube URL 사용\nsamples/sample_url.txt",
                     elem_classes=["sample-card"],
                 )
-            with gr.Row(elem_id="tab1_webcam_row", elem_classes=["src-hidden"]):
+            with gr.Row(elem_id="tab1_webcam_row"):
                 webcam_index = gr.Dropdown(
                     choices=_webcam_choices,
                     value=_webcam_value,
@@ -851,8 +852,8 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
 
             with gr.Row():
                 inf_source_type = gr.Radio(
-                    choices=["YouTube URL", "웹캠", "비디오 파일", "이미지 폴더"],
-                    value="YouTube URL",
+                    choices=["웹캠", "YouTube URL", "비디오 파일", "이미지 폴더"],
+                    value="웹캠",
                     label="소스",
                 )
 
@@ -860,13 +861,14 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
                 placeholder="https://www.youtube.com/watch?v=...",
                 label="YouTube URL",
                 elem_id="tab5_youtube_url",
+                elem_classes=["src-hidden"],
             )
-            with gr.Row(elem_id="tab5_youtube_sample_row"):
+            with gr.Row(elem_id="tab5_youtube_sample_row", elem_classes=["src-hidden"]):
                 inf_youtube_sample_btn = gr.Button(
                     "샘플 YouTube URL 사용\nsamples/sample_url.txt",
                     elem_classes=["sample-card"],
                 )
-            with gr.Row(elem_id="tab5_webcam_row", elem_classes=["src-hidden"]):
+            with gr.Row(elem_id="tab5_webcam_row"):
                 inf_webcam_index = gr.Dropdown(
                     choices=_webcam_choices,
                     value=_webcam_value,
@@ -1003,8 +1005,8 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
 
             with gr.Row():
                 zm_source_type = gr.Radio(
-                    choices=["YouTube URL", "웹캠", "비디오 파일", "이미지 폴더"],
-                    value="YouTube URL",
+                    choices=["웹캠", "YouTube URL", "비디오 파일", "이미지 폴더"],
+                    value="웹캠",
                     label="소스",
                 )
 
@@ -1012,13 +1014,14 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
                 placeholder="https://www.youtube.com/watch?v=...",
                 label="YouTube URL",
                 elem_id="tab6_youtube_url",
+                elem_classes=["src-hidden"],
             )
-            with gr.Row(elem_id="tab6_youtube_sample_row"):
+            with gr.Row(elem_id="tab6_youtube_sample_row", elem_classes=["src-hidden"]):
                 zm_youtube_sample_btn = gr.Button(
                     "샘플 YouTube URL 사용\nsamples/sample_url.txt",
                     elem_classes=["sample-card"],
                 )
-            with gr.Row(elem_id="tab6_webcam_row", elem_classes=["src-hidden"]):
+            with gr.Row(elem_id="tab6_webcam_row"):
                 zm_webcam_index = gr.Dropdown(
                     choices=_webcam_choices,
                     value=_webcam_value,
