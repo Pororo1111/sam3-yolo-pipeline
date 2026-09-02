@@ -2,6 +2,7 @@ import html as _html
 from pathlib import Path
 
 import gradio as gr
+from dotenv import load_dotenv
 from pipeline import (
     dataset,
     dataset_importer,
@@ -13,6 +14,9 @@ from pipeline import (
     webcams,
     zone_monitor,
 )
+
+
+load_dotenv()
 
 
 SAMPLES_DIR = Path("samples")
