@@ -363,6 +363,21 @@ _CSS = (
     ".cls-name-box input { font-weight:600; }"
     # 본문 패널이 좁은 화면에서도 넘치지 않도록
     ".main-panel { max-width: 1100px; margin: 0 auto; width: 100%; }"
+    # Gradio 이미지 전체화면은 내부 프레임 폭을 원본 이미지 크기에 맞추므로 저해상도
+    # 프레임이 작게 남는다. 실시간 미리보기는 화면 전체를 사용하되 비율은 보존한다.
+    ".live-preview.fullscreen .image-container, "
+    ".live-preview .image-container:fullscreen { "
+    "width: 100vw !important; height: 100vh !important; background: #000; }"
+    ".live-preview.fullscreen .image-container > button, "
+    ".live-preview.fullscreen .image-container .image-frame, "
+    ".live-preview .image-container:fullscreen > button, "
+    ".live-preview .image-container:fullscreen .image-frame { "
+    "width: 100% !important; height: 100% !important; }"
+    ".live-preview.fullscreen .image-container img, "
+    ".live-preview .image-container:fullscreen img { "
+    "width: 100% !important; height: 100% !important; "
+    "max-width: 100vw !important; max-height: 100vh !important; "
+    "object-fit: contain !important; }"
     # 미리보기 갤러리: 항상 4열 격자로 고정. Gradio는 이미지 수에 맞춰 --grid-cols를
     # 줄여(1장이면 1열) 이미지가 칸 전체로 커지므로, grid-template-columns를 4열로 강제.
     "#label_gallery .grid-container { grid-template-columns: repeat(4, minmax(0, 1fr)) !important; }"
@@ -466,7 +481,12 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
                 cap_start_btn = gr.Button("캡처 시작", variant="primary")
                 cap_stop_btn  = gr.Button("중지", variant="stop")
 
-            cap_preview = gr.Image(label="실시간 미리보기", type="numpy", streaming=True)
+            cap_preview = gr.Image(
+                label="실시간 미리보기",
+                type="numpy",
+                streaming=True,
+                elem_classes=["live-preview"],
+            )
             cap_status  = gr.Textbox(label="상태", interactive=False)
 
             youtube_sample_btn.click(
@@ -543,6 +563,7 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
 
             label_preview = gr.Image(
                 label="전체 라벨링 진행 미리보기", type="numpy", streaming=True,
+                elem_classes=["live-preview"],
             )
             label_status  = gr.Textbox(label="상태", interactive=False)
 
@@ -994,7 +1015,12 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
                 inf_start_btn = gr.Button("추론 시작", variant="primary")
                 inf_stop_btn  = gr.Button("중지", variant="stop")
 
-            inf_preview = gr.Image(label="추론 결과", type="numpy", streaming=True)
+            inf_preview = gr.Image(
+                label="추론 결과",
+                type="numpy",
+                streaming=True,
+                elem_classes=["live-preview"],
+            )
             inf_status  = gr.Textbox(label="상태", interactive=False)
 
             inf_youtube_sample_btn.click(
@@ -1151,6 +1177,7 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
                 label="Safety Cone 자동 추적 실시간 영상",
                 type="numpy",
                 streaming=True,
+                elem_classes=["live-preview"],
             )
             zm_stream_status = gr.Textbox(label="상태", interactive=False)
             gr.Markdown(
