@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
@@ -74,6 +75,36 @@ class ZoneMonitorTests(unittest.TestCase):
         self.assertEqual(missing, 0)
         with self.runtime.lock:
             self.assertAlmostEqual(self.runtime.zones[0]["anchors"][0]["point"][1], 0.82)
+
+    def test_detection_boxes_and_labels_scale_for_display_resize(self):
+        frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+        observation = zone_monitor.TrackObservation(
+            7,
+            1,
+            0.9,
+            "person",
+            (0.1, 0.2, 0.5, 0.8),
+        )
+        expected_scale = 1920 / zone_monitor.vision.DISPLAY_MAX_WIDTH
+
+        with (
+            patch("pipeline.zone_monitor.cv2.rectangle") as rectangle,
+            patch("pipeline.zone_monitor.cv2.putText") as put_text,
+        ):
+            zone_monitor._draw_track_observations(frame, [observation])
+
+        self.assertEqual(
+            rectangle.call_args.args[-1],
+            round(zone_monitor._DETECTION_BOX_THICKNESS * expected_scale),
+        )
+        self.assertAlmostEqual(
+            put_text.call_args.args[4],
+            zone_monitor._DETECTION_FONT_SCALE * expected_scale,
+        )
+        self.assertEqual(
+            put_text.call_args.args[-1],
+            round(zone_monitor._DETECTION_TEXT_THICKNESS * expected_scale),
+        )
 
     def test_tracked_mode_auto_selects_cone_tracks_in_polygon_order(self):
         with self.runtime.lock:

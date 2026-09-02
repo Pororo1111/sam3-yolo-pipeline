@@ -20,6 +20,9 @@ MODE_TRACKED = "tracked"
 TRACKER_CONFIG = "bytetrack.yaml"
 _TRACK_CONFIDENCE = 0.1
 _DISPLAY_INTERVAL = 1.0 / 15
+_DETECTION_BOX_THICKNESS = 4
+_DETECTION_FONT_SCALE = 0.9
+_DETECTION_TEXT_THICKNESS = 3
 
 
 @dataclass(frozen=True)
@@ -342,20 +345,26 @@ def _draw_track_observations(
     observations: list[TrackObservation],
 ) -> np.ndarray:
     height, width = frame.shape[:2]
+    scale = vision.annotation_scale(frame)
+    box_thickness = max(1, round(_DETECTION_BOX_THICKNESS * scale))
+    font_scale = _DETECTION_FONT_SCALE * scale
+    text_thickness = max(1, round(_DETECTION_TEXT_THICKNESS * scale))
+    label_offset = max(8, round(8 * scale))
+    minimum_baseline = max(24, round(24 * scale))
     for observation in observations:
         x1, y1 = _point_pixels(observation.xyxy[:2], width, height)
         x2, y2 = _point_pixels(observation.xyxy[2:], width, height)
         color = _zone_box_color(observation.class_id)
-        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color, box_thickness)
         track = f" #{observation.track_id}" if observation.track_id >= 0 else ""
         cv2.putText(
             frame,
             f"{observation.class_name}{track} {observation.confidence:.2f}",
-            (x1, max(y1 - 6, 0)),
+            (x1, max(y1 - label_offset, minimum_baseline)),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.55,
+            font_scale,
             color,
-            2,
+            text_thickness,
         )
     return frame
 
