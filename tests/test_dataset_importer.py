@@ -54,14 +54,21 @@ class DatasetImporterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             run_dir = Path(directory)
             (run_dir / "results.csv").write_text(
-                "epoch,train/box_loss,train/cls_loss,metrics/precision(B),"
+                "epoch,time,train/box_loss,train/cls_loss,train/dfl_loss,"
+                "val/box_loss,val/cls_loss,val/dfl_loss,metrics/precision(B),"
                 "metrics/recall(B),metrics/mAP50(B),metrics/mAP50-95(B)\n"
-                "3,1.25,0.75,0.8,0.7,0.6,0.4\n",
+                "2,12.5,1.5,0.9,1.1,1.7,1.0,1.2,0.7,0.6,0.5,0.3\n"
+                "3,19.0,1.25,0.75,0.95,1.4,0.8,1.0,0.8,0.7,0.6,0.4\n",
                 encoding="utf-8",
             )
 
+            history = trainer._metrics_history_from_results(str(run_dir))
             metrics = trainer._metrics_from_results(str(run_dir))
 
+            self.assertEqual(len(history), 2)
+            self.assertEqual(history[0]["epoch"], 2)
+            self.assertEqual(history[0]["time"], 12.5)
+            self.assertEqual(history[1]["val_box_loss"], 1.4)
             self.assertEqual(metrics["epoch"], 3)
             self.assertEqual(metrics["precision"], 0.8)
             self.assertEqual(metrics["map50_95"], 0.4)
@@ -361,6 +368,7 @@ class DatasetImporterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             runtime = Path(directory)
             with (
+                mock.patch.object(trainer, "_runtime", {"status": "idle"}),
                 mock.patch.object(trainer, "_RUNTIME_DIR", runtime),
                 mock.patch.object(trainer, "_STATE_PATH", runtime / "state.json"),
                 mock.patch.object(trainer, "_LOG_PATH", runtime / "train.log"),

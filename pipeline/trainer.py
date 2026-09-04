@@ -117,35 +117,51 @@ def _load_runtime_state() -> None:
             _write_state_locked()
 
 
-def _metrics_from_results(run_dir: str | None) -> dict[str, Any]:
+def _metrics_history_from_results(run_dir: str | None) -> list[dict[str, Any]]:
+    """results.csv 전체를 epoch별 대시보드 데이터로 반환한다."""
+
     if not run_dir:
-        return {}
+        return []
     csv_path = Path(run_dir) / "results.csv"
     try:
         with csv_path.open(encoding="utf-8-sig", newline="") as file:
             rows = list(csv.DictReader(file))
     except (OSError, csv.Error):
-        return {}
-    if not rows:
-        return {}
-    row = rows[-1]
+        return []
 
-    def number(key: str) -> float | None:
+    def number(row: dict[str, str], key: str) -> float | None:
         try:
             return float(row[key])
         except (KeyError, TypeError, ValueError):
             return None
 
-    return {
-        "epoch": int(number("epoch") or 0),
-        "box_loss": number("train/box_loss"),
-        "cls_loss": number("train/cls_loss"),
-        "dfl_loss": number("train/dfl_loss"),
-        "precision": number("metrics/precision(B)"),
-        "recall": number("metrics/recall(B)"),
-        "map50": number("metrics/mAP50(B)"),
-        "map50_95": number("metrics/mAP50-95(B)"),
-    }
+    history = []
+    for row in rows:
+        epoch = number(row, "epoch")
+        if epoch is None:
+            continue
+        history.append(
+            {
+                "epoch": int(epoch),
+                "time": number(row, "time"),
+                "box_loss": number(row, "train/box_loss"),
+                "cls_loss": number(row, "train/cls_loss"),
+                "dfl_loss": number(row, "train/dfl_loss"),
+                "val_box_loss": number(row, "val/box_loss"),
+                "val_cls_loss": number(row, "val/cls_loss"),
+                "val_dfl_loss": number(row, "val/dfl_loss"),
+                "precision": number(row, "metrics/precision(B)"),
+                "recall": number(row, "metrics/recall(B)"),
+                "map50": number(row, "metrics/mAP50(B)"),
+                "map50_95": number(row, "metrics/mAP50-95(B)"),
+            }
+        )
+    return history
+
+
+def _metrics_from_results(run_dir: str | None) -> dict[str, Any]:
+    history = _metrics_history_from_results(run_dir)
+    return history[-1] if history else {}
 
 
 def training_snapshot() -> dict[str, Any]:
@@ -154,7 +170,9 @@ def training_snapshot() -> dict[str, Any]:
         snapshot = dict(_runtime)
     snapshot["active"] = snapshot.get("status") in _ACTIVE_STATUSES
     snapshot["log"] = _read_log()
-    snapshot["metrics"] = _metrics_from_results(snapshot.get("run_dir"))
+    history = _metrics_history_from_results(snapshot.get("run_dir"))
+    snapshot["history"] = history
+    snapshot["metrics"] = history[-1] if history else {}
     return snapshot
 
 
