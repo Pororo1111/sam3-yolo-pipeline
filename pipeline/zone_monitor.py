@@ -840,6 +840,7 @@ def stream(
     folder_files=None,
     webcam_index=None,
     video_file=None,
+    browser_session_id: str = "",
 ):
     runtime = _runtime(session_id)
     run_id, stop_event = _begin_stream(runtime)
@@ -888,6 +889,7 @@ def stream(
             youtube_url=youtube_url,
             webcam_index=webcam_index,
             video_file=video_file,
+            browser_session_id=browser_session_id,
         )
     except media.MediaSourceError as exc:
         yield None, str(exc)

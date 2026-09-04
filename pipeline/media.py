@@ -37,7 +37,7 @@ class MediaSourceError(RuntimeError):
 class VideoSource:
     """OpenCV가 열 수 있는 영상 소스와 재생 특성."""
 
-    value: str | int
+    value: str | int | webcams.BrowserWebcamSource
     source_type: str
     pace_reads: bool
 
@@ -153,11 +153,22 @@ def resolve_video_source(
     youtube_url: str = "",
     webcam_index=None,
     video_file=None,
+    browser_session_id: str = "",
 ) -> VideoSource:
     """UI 입력을 OpenCV용 영상 소스로 변환한다."""
 
     if source_type == SOURCE_WEBCAM:
         try:
+            browser_source = webcams.parse_browser_webcam_value(
+                webcam_index,
+                browser_session_id,
+            )
+            if browser_source is not None:
+                return VideoSource(
+                    value=browser_source,
+                    source_type=source_type,
+                    pace_reads=False,
+                )
             index = webcams.coerce_webcam_index(webcam_index)
         except webcams.WebcamOpenError as exc:
             raise MediaSourceError(str(exc)) from exc
@@ -183,7 +194,10 @@ def open_video_capture(source: VideoSource) -> Iterator[cv2.VideoCapture]:
 
     if source.source_type == SOURCE_WEBCAM:
         try:
-            capture = webcams.open_webcam(source.value)
+            if isinstance(source.value, webcams.BrowserWebcamSource):
+                capture = webcams.open_browser_webcam(source.value)
+            else:
+                capture = webcams.open_webcam(source.value)
         except webcams.WebcamOpenError as exc:
             raise MediaSourceError(str(exc)) from exc
     else:

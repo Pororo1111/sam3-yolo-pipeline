@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass
 
 import cv2
 import numpy as np
@@ -11,6 +12,18 @@ import numpy as np
 Color = tuple[int, int, int]
 ColorProvider = Callable[[int], Color]
 Detection = tuple[str, tuple[float, float, float, float]]
+
+
+@dataclass(frozen=True)
+class BoxAnnotation:
+    """프레임에 표시할 하나의 감지 박스 정보."""
+
+    x1: float
+    y1: float
+    x2: float
+    y2: float
+    label: str
+    color: Color
 
 DISPLAY_MAX_WIDTH = 854
 DEFAULT_BOX_THICKNESS = 4
@@ -80,6 +93,55 @@ def annotation_scale(frame: np.ndarray, max_width: int = DISPLAY_MAX_WIDTH) -> f
     return max(1.0, width / max(1, int(max_width)))
 
 
+def box_annotations(
+    boxes: Iterable | None,
+    names: Mapping,
+    *,
+    color_provider: ColorProvider = class_color,
+) -> list[BoxAnnotation]:
+    """Ultralytics 결과를 OpenCV와 브라우저가 공유하는 표시 정보로 변환한다."""
+
+    if boxes is None:
+        return []
+
+    box_list = list(boxes)
+    detections = []
+    for box in box_list:
+        class_id = int(box.cls[0])
+        detections.append(
+            (str(names.get(class_id, class_id)), tuple(map(float, box.xyxy[0])))
+        )
+    worker_indexes = worker_person_indexes(detections)
+
+    annotations = []
+    for index, box in enumerate(box_list):
+        x1, y1, x2, y2 = map(float, box.xyxy[0])
+        class_id = int(box.cls[0])
+        confidence = float(box.conf[0])
+        track_id = getattr(box, "id", None)
+        if track_id is not None:
+            try:
+                value = track_id[0]
+                if hasattr(value, "item"):
+                    value = value.item()
+                track_id = int(value)
+            except (TypeError, ValueError, IndexError, RuntimeError):
+                track_id = None
+        track_label = f" #{track_id}" if track_id is not None else ""
+        class_label = "worker" if index in worker_indexes else names.get(class_id, class_id)
+        annotations.append(
+            BoxAnnotation(
+                x1=x1,
+                y1=y1,
+                x2=x2,
+                y2=y2,
+                label=f"{class_label}{track_label} {confidence:.2f}",
+                color=color_provider(class_id),
+            )
+        )
+    return annotations
+
+
 def draw_boxes(
     frame_bgr: np.ndarray,
     boxes: Iterable | None,
@@ -93,9 +155,6 @@ def draw_boxes(
     """Ultralytics box 결과를 BGR 프레임에 그린다."""
 
     annotated = frame_bgr.copy()
-    if boxes is None:
-        return annotated
-
     scale = annotation_scale(frame_bgr)
     scaled_font = float(font_scale) * scale
     scaled_box_thickness = max(1, round(int(box_thickness) * scale))
@@ -103,46 +162,29 @@ def draw_boxes(
     label_offset = max(8, round(8 * scale))
     minimum_baseline = max(24, round(24 * scale))
 
-    box_list = list(boxes)
-    detections = []
-    for box in box_list:
-        class_id = int(box.cls[0])
-        detections.append(
-            (str(names.get(class_id, class_id)), tuple(map(float, box.xyxy[0])))
+    for annotation in box_annotations(
+        boxes,
+        names,
+        color_provider=color_provider,
+    ):
+        x1, y1, x2, y2 = map(
+            int,
+            (annotation.x1, annotation.y1, annotation.x2, annotation.y2),
         )
-    worker_indexes = worker_person_indexes(detections)
-
-    for index, box in enumerate(box_list):
-        x1, y1, x2, y2 = map(int, box.xyxy[0])
-        class_id = int(box.cls[0])
-        confidence = float(box.conf[0])
-        color = color_provider(class_id)
-        track_id = getattr(box, "id", None)
-        if track_id is not None:
-            try:
-                value = track_id[0]
-                if hasattr(value, "item"):
-                    value = value.item()
-                track_id = int(value)
-            except (TypeError, ValueError, IndexError, RuntimeError):
-                track_id = None
-        track_label = f" #{track_id}" if track_id is not None else ""
-        class_label = "worker" if index in worker_indexes else names.get(class_id, class_id)
-        label = f"{class_label}{track_label} {confidence:.2f}"
         cv2.rectangle(
             annotated,
             (x1, y1),
             (x2, y2),
-            color,
+            annotation.color,
             scaled_box_thickness,
         )
         cv2.putText(
             annotated,
-            label,
+            annotation.label,
             (x1, max(y1 - label_offset, minimum_baseline)),
             cv2.FONT_HERSHEY_SIMPLEX,
             scaled_font,
-            color,
+            annotation.color,
             scaled_text_thickness,
         )
     return annotated
