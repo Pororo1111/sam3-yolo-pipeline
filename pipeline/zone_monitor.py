@@ -20,6 +20,9 @@ MODE_TRACKED = "tracked"
 TRACKER_CONFIG = "bytetrack.yaml"
 _TRACK_CONFIDENCE = 0.1
 _DISPLAY_INTERVAL = 1.0 / 15
+_DETECTION_BOX_THICKNESS = 4
+_DETECTION_FONT_SCALE = 0.9
+_DETECTION_TEXT_THICKNESS = 3
 
 
 @dataclass(frozen=True)
@@ -135,7 +138,19 @@ def _observations_from_boxes(boxes, names: dict, frame_shape) -> list[TrackObser
             )
         except (TypeError, ValueError, IndexError):
             continue
-    return observations
+    worker_indexes = vision.worker_person_indexes(
+        (item.class_name, item.xyxy) for item in observations
+    )
+    return [
+        TrackObservation(
+            track_id=item.track_id,
+            class_id=item.class_id,
+            confidence=item.confidence,
+            class_name="worker" if index in worker_indexes else item.class_name,
+            xyxy=item.xyxy,
+        )
+        for index, item in enumerate(observations)
+    ]
 
 
 def _point_pixels(point, width: int, height: int) -> tuple[int, int]:
@@ -342,20 +357,26 @@ def _draw_track_observations(
     observations: list[TrackObservation],
 ) -> np.ndarray:
     height, width = frame.shape[:2]
+    scale = vision.annotation_scale(frame)
+    box_thickness = max(1, round(_DETECTION_BOX_THICKNESS * scale))
+    font_scale = _DETECTION_FONT_SCALE * scale
+    text_thickness = max(1, round(_DETECTION_TEXT_THICKNESS * scale))
+    label_offset = max(8, round(8 * scale))
+    minimum_baseline = max(24, round(24 * scale))
     for observation in observations:
         x1, y1 = _point_pixels(observation.xyxy[:2], width, height)
         x2, y2 = _point_pixels(observation.xyxy[2:], width, height)
         color = _zone_box_color(observation.class_id)
-        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color, box_thickness)
         track = f" #{observation.track_id}" if observation.track_id >= 0 else ""
         cv2.putText(
             frame,
             f"{observation.class_name}{track} {observation.confidence:.2f}",
-            (x1, max(y1 - 6, 0)),
+            (x1, max(y1 - label_offset, minimum_baseline)),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.55,
+            font_scale,
             color,
-            2,
+            text_thickness,
         )
     return frame
 
@@ -764,12 +785,18 @@ def _is_current(runtime: ZoneRuntime, run_id: str, stop_event: threading.Event) 
         )
 
 
-def _track_frame(model, frame_bgr: np.ndarray, visible_conf: float):
+def _track_frame(
+    model,
+    frame_bgr: np.ndarray,
+    visible_conf: float,
+    class_ids: list[int],
+):
     results = model.track(
         frame_bgr,
         persist=True,
         tracker=TRACKER_CONFIG,
         conf=min(_TRACK_CONFIDENCE, max(0.01, float(visible_conf))),
+        classes=class_ids,
         verbose=False,
     )
     return results[0].boxes if results and results[0].boxes is not None else None
@@ -813,6 +840,7 @@ def stream(
     folder_files=None,
     webcam_index=None,
     video_file=None,
+    browser_session_id: str = "",
 ):
     runtime = _runtime(session_id)
     run_id, stop_event = _begin_stream(runtime)
@@ -832,6 +860,7 @@ def stream(
         return
 
     names = model.names or {}
+    class_ids = vision.inference_class_ids(names)
     interval = max(1, int(infer_every))
 
     if source_type == media.SOURCE_IMAGES:
@@ -842,6 +871,7 @@ def stream(
                 stop_event,
                 model,
                 names,
+                class_ids,
                 folder_files,
                 float(conf),
                 interval,
@@ -859,6 +889,7 @@ def stream(
             youtube_url=youtube_url,
             webcam_index=webcam_index,
             video_file=video_file,
+            browser_session_id=browser_session_id,
         )
     except media.MediaSourceError as exc:
         yield None, str(exc)
@@ -881,7 +912,12 @@ def stream(
 
                 effective_interval = 1
                 if frame_index % effective_interval == 0:
-                    boxes = _track_frame(model, frame_bgr, float(conf))
+                    boxes = _track_frame(
+                        model,
+                        frame_bgr,
+                        float(conf),
+                        class_ids,
+                    )
                     observations = _observations_from_boxes(
                         boxes,
                         names,
@@ -951,6 +987,7 @@ def _stream_folder(
     stop_event: threading.Event,
     model,
     names: dict,
+    class_ids: list[int],
     folder_files,
     conf: float,
     infer_every: int,
@@ -977,7 +1014,7 @@ def _stream_folder(
                 continue
             effective_interval = 1
             if frame_index % effective_interval == 0:
-                boxes = _track_frame(model, frame_bgr, conf)
+                boxes = _track_frame(model, frame_bgr, conf, class_ids)
                 observations = _observations_from_boxes(boxes, names, frame_bgr.shape)
                 if not _update_tracking_and_latest(
                     runtime,

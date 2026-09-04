@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import json
 from contextlib import contextmanager
 from pathlib import Path
 from unittest import mock
@@ -15,6 +16,59 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ExtractorTests(unittest.TestCase):
+    def test_multiple_youtube_urls_are_saved_as_separate_source_groups(self):
+        frame = np.zeros((8, 8, 3), dtype=np.uint8)
+
+        class ShortCapture:
+            def __init__(self):
+                self.frames = [(True, frame), (True, frame), (False, None)]
+
+            def read(self):
+                return self.frames.pop(0)
+
+            def get(self, _property):
+                return 30.0
+
+        @contextmanager
+        def open_capture(_source):
+            yield ShortCapture()
+
+        urls = "https://example.test/a\nhttps://example.test/b"
+        sources = [
+            media.VideoSource(url, media.SOURCE_YOUTUBE, False)
+            for url in urls.splitlines()
+        ]
+
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory) / "raw_frames"
+            with (
+                mock.patch.object(extractor, "OUT_DIR", output_dir),
+                mock.patch.object(
+                    media,
+                    "resolve_video_source",
+                    side_effect=sources,
+                ),
+                mock.patch.object(
+                    media,
+                    "open_video_capture",
+                    side_effect=open_capture,
+                ),
+            ):
+                outputs = list(
+                    extractor.capture(media.SOURCE_YOUTUBE, urls, 30)
+                )
+
+            self.assertEqual(len(list(output_dir.glob("frame_yt001_*.jpg"))), 2)
+            self.assertEqual(len(list(output_dir.glob("frame_yt002_*.jpg"))), 2)
+            manifest = json.loads(
+                (output_dir.parent / "sources.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                [source["id"] for source in manifest["sources"]],
+                ["yt001", "yt002"],
+            )
+            self.assertIn("2/2개 소스", outputs[-1][1])
+
     def test_video_capture_yields_rgb_preview_and_saves_frame(self):
         sample_video = ROOT / "samples" / "sample.mp4"
         self.assertTrue(sample_video.is_file())

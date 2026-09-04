@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -91,6 +93,73 @@ class WebcamTests(unittest.TestCase):
         ):
             choices = webcams.list_webcams()
         self.assertIn("12", [value for _, value in choices])
+
+    def test_dropdown_puts_server_cameras_before_browser_cameras(self):
+        payload = json.dumps(
+            {
+                "devices": [
+                    {"id": "front-id", "label": "Front Camera"},
+                    {"id": "back-id", "label": "Back Camera"},
+                ]
+            }
+        )
+        with mock.patch.object(
+            webcams,
+            "list_webcams",
+            return_value=[("카메라 0", "0")],
+        ):
+            choices, value = webcams.refresh_webcam_dropdown(payload, "capture")
+
+        self.assertEqual(value, "0")
+        self.assertEqual(choices[0], ("서버 · 카메라 0", "0"))
+        self.assertEqual([label for label, _value in choices[1:]], [
+            "접속 기기 · Front Camera",
+            "접속 기기 · Back Camera",
+        ])
+        parsed = webcams.parse_browser_webcam_value(choices[1][1], "session-a")
+        self.assertEqual(parsed.channel, "capture")
+        self.assertEqual(parsed.device_id, "front-id")
+
+    def test_browser_capture_receives_new_rgb_frame_as_bgr(self):
+        session_id = webcams.create_browser_session()
+        value = webcams.browser_webcam_value("inference", "phone-camera")
+        source = webcams.parse_browser_webcam_value(value, session_id)
+        capture = webcams.open_browser_webcam(source)
+        rgb = np.array([[[10, 20, 30]]], dtype=np.uint8)
+
+        sender = threading.Timer(
+            0.02,
+            webcams.push_browser_frame,
+            args=(session_id, value, rgb),
+        )
+        sender.start()
+        try:
+            ok, frame_bgr = capture.read()
+        finally:
+            sender.join()
+            capture.release()
+            webcams.delete_browser_session(session_id)
+
+        self.assertTrue(ok)
+        np.testing.assert_array_equal(
+            frame_bgr,
+            np.array([[[30, 20, 10]]], dtype=np.uint8),
+        )
+
+    def test_browser_payload_deduplicates_and_limits_untrusted_devices(self):
+        payload = json.dumps(
+            {
+                "devices": [
+                    {"id": "same", "label": "First"},
+                    {"id": "same", "label": "Duplicate"},
+                    {"id": "other", "label": ""},
+                ],
+                "error": "permission warning",
+            }
+        )
+        devices, error = webcams.parse_browser_devices_payload(payload)
+        self.assertEqual(devices, [("same", "First"), ("other", "카메라 3")])
+        self.assertEqual(error, "permission warning")
 
 
 if __name__ == "__main__":

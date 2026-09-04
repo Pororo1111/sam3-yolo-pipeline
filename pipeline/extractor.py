@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 import threading
 import time
@@ -71,6 +72,7 @@ def capture(
     folder_files=None,
     webcam_index=None,
     video_file=None,
+    browser_session_id: str = "",
 ):
     """프레임과 상태 문자열을 연속으로 생성한다."""
 
@@ -90,11 +92,25 @@ def capture(
             if not _controller.prepare_output():
                 yield None, stop()
                 return
-            yield from _import_images(images)
+            source_id = "images001"
+            copied_count = yield from _import_images(images, source_id)
+            _write_sources_manifest([
+                {
+                    "id": source_id,
+                    "type": source_type,
+                    "value": "업로드 이미지",
+                    "frame_count": copied_count,
+                }
+            ])
             return
 
         if source_type == media.SOURCE_YOUTUBE:
-            yield None, "YouTube 스트림 URL 추출 중..."
+            urls = _parse_youtube_urls(youtube_url)
+            if not urls:
+                yield None, "YouTube URL을 한 줄에 하나씩 입력하세요."
+                return
+            yield from _capture_youtube_urls(urls, max(1, int(capture_fps)))
+            return
 
         try:
             source = media.resolve_video_source(
@@ -102,6 +118,7 @@ def capture(
                 youtube_url=youtube_url,
                 webcam_index=webcam_index,
                 video_file=video_file,
+                browser_session_id=browser_session_id,
             )
             with media.open_video_capture(source) as video:
                 ok, first_frame = video.read()
@@ -113,12 +130,26 @@ def capture(
                 if not _controller.prepare_output():
                     yield None, stop()
                     return
-                yield from _capture_video(
+                source_id = (
+                    "webcam001"
+                    if source_type == media.SOURCE_WEBCAM
+                    else "video001"
+                )
+                saved_count, _last_preview = yield from _capture_video(
                     video,
                     source,
                     max(1, int(capture_fps)),
+                    source_id,
                     first_frame=first_frame,
                 )
+                _write_sources_manifest([
+                    {
+                        "id": source_id,
+                        "type": source_type,
+                        "value": str(video_file or webcam_index or ""),
+                        "frame_count": saved_count,
+                    }
+                ])
         except media.MediaSourceError as exc:
             yield None, str(exc)
     except GeneratorExit:
@@ -131,13 +162,119 @@ def _reset_output_directory() -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     for path in OUT_DIR.glob("frame_*.jpg"):
         path.unlink()
+    # raw_frames 전체를 새 캡처 묶음으로 교체하므로 대응하는 평면 라벨도 제거한다.
+    # labels/train, labels/val 하위의 이미 구성된 데이터셋은 보존한다.
+    labels_dir = OUT_DIR.parent / "labels"
+    if labels_dir.exists():
+        for path in labels_dir.glob("*.txt"):
+            path.unlink()
+    manifest_path = OUT_DIR.parent / "sources.json"
+    if manifest_path.exists():
+        manifest_path.unlink()
+
+
+def _parse_youtube_urls(value: str) -> list[str]:
+    """한 줄에 하나씩 입력된 URL을 순서 유지 중복 제거한다."""
+
+    urls = []
+    seen = set()
+    for line in (value or "").splitlines():
+        url = line.strip()
+        if url and url not in seen:
+            seen.add(url)
+            urls.append(url)
+    return urls
+
+
+def _write_sources_manifest(records: list[dict]) -> None:
+    path = OUT_DIR.parent / "sources.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"version": 1, "sources": records}
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _capture_youtube_urls(urls: list[str], target_fps: int):
+    """여러 YouTube URL을 소스별 파일명으로 차례대로 추출한다."""
+
+    records: list[dict] = []
+    errors: list[str] = []
+    prepared = False
+    total_saved = 0
+    last_preview = None
+
+    for index, url in enumerate(urls, start=1):
+        if _controller.stop_event.is_set():
+            break
+
+        source_id = f"yt{index:03d}"
+        yield last_preview, (
+            f"YouTube {index}/{len(urls)} 스트림 URL 추출 중...  |  {source_id}"
+        )
+        try:
+            source = media.resolve_video_source(
+                media.SOURCE_YOUTUBE,
+                youtube_url=url,
+            )
+            with media.open_video_capture(source) as video:
+                ok, first_frame = video.read()
+                if not ok or not _valid_frame(first_frame):
+                    raise media.MediaSourceError(
+                        "소스는 열렸지만 첫 프레임을 읽지 못했습니다."
+                    )
+                if not prepared:
+                    if not _controller.prepare_output():
+                        yield last_preview, stop()
+                        return
+                    prepared = True
+
+                result = yield from _capture_video(
+                    video,
+                    source,
+                    target_fps,
+                    source_id,
+                    saved_offset=total_saved,
+                    first_frame=first_frame,
+                    source_position=(index, len(urls)),
+                )
+                saved_count, last_preview = result
+                total_saved += saved_count
+                records.append(
+                    {
+                        "id": source_id,
+                        "type": media.SOURCE_YOUTUBE,
+                        "value": url,
+                        "frame_count": saved_count,
+                    }
+                )
+                _write_sources_manifest(records)
+        except media.MediaSourceError as exc:
+            errors.append(f"{source_id}: {exc}")
+            yield last_preview, f"{source_id} 처리 실패 — {exc}"
+
+    if not prepared:
+        detail = "\n".join(errors) if errors else "열 수 있는 URL이 없습니다."
+        yield last_preview, f"YouTube 프레임을 추출하지 못했습니다.\n{detail}"
+        return
+
+    prefix = "중지됨" if _controller.stop_event.is_set() else "전체 완료"
+    error_text = f"  |  실패 {len(errors)}개" if errors else ""
+    yield last_preview, (
+        f"{prefix} — {len(records)}/{len(urls)}개 소스, "
+        f"총 {total_saved}장 저장{error_text}  →  {OUT_DIR.resolve()}"
+    )
 
 
 def _capture_video(
     video: cv2.VideoCapture,
     source: media.VideoSource,
     target_fps: int,
+    source_id: str,
+    saved_offset: int = 0,
     first_frame=None,
+    source_position: tuple[int, int] | None = None,
 ):
     source_fps = media.capture_fps(video)
     save_every = max(1, round(source_fps / target_fps))
@@ -188,19 +325,25 @@ def _capture_video(
             break
 
         if frame_index % save_every == 0:
-            output_path = OUT_DIR / f"frame_{saved_count:05d}.jpg"
+            output_path = OUT_DIR / f"frame_{source_id}_{saved_count:05d}.jpg"
             if not cv2.imwrite(str(output_path), frame_bgr):
                 raise OSError(f"프레임 저장 실패: {output_path}")
             saved_count += 1
-            _controller.saved(saved_count)
+            _controller.saved(saved_offset + saved_count)
 
         now = time.perf_counter()
         if last_preview_at == 0.0 or now - last_preview_at >= preview_interval:
             last_preview_at = now
             last_preview = vision.to_rgb(frame_bgr)
+            source_text = (
+                f"소스 {source_position[0]}/{source_position[1]}  |  "
+                if source_position
+                else ""
+            )
             yield (
                 last_preview,
-                f"{saved_count}장 저장 중...  |  미리보기 {preview_fps}fps",
+                f"{source_text}{source_id} {saved_count}장 저장 중...  "
+                f"|  미리보기 {preview_fps}fps",
             )
 
         frame_index += 1
@@ -208,11 +351,12 @@ def _capture_video(
     prefix = "중지됨" if _controller.stop_event.is_set() else "완료"
     yield (
         last_preview,
-        f"{prefix} — {saved_count}장 저장 완료  →  {OUT_DIR.resolve()}",
+        f"{prefix} — {source_id} {saved_count}장 저장 완료  →  {OUT_DIR.resolve()}",
     )
+    return saved_count, last_preview
 
 
-def _import_images(images: list[Path]):
+def _import_images(images: list[Path], source_id: str):
     total = len(images)
     yield None, f"{total}장 발견 — 복사 시작..."
 
@@ -224,7 +368,7 @@ def _import_images(images: list[Path]):
         if _controller.stop_event.is_set():
             break
 
-        output_path = OUT_DIR / f"frame_{copied_count:05d}.jpg"
+        output_path = OUT_DIR / f"frame_{source_id}_{copied_count:05d}.jpg"
         try:
             frame_bgr = None
             if source_path.suffix.lower() in {".jpg", ".jpeg"}:
@@ -264,3 +408,4 @@ def _import_images(images: list[Path]):
         last_preview,
         f"{prefix} — {copied_count}장 복사 완료  →  {OUT_DIR.resolve()}",
     )
+    return copied_count

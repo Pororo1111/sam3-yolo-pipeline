@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
@@ -16,6 +17,43 @@ class ZoneMonitorTests(unittest.TestCase):
 
     def tearDown(self):
         zone_monitor.delete_session(self.session_id)
+
+    def test_track_frame_passes_allowed_classes_to_model(self):
+        class Model:
+            def track(self, frame, **kwargs):
+                self.kwargs = kwargs
+                return []
+
+        model = Model()
+        boxes = zone_monitor._track_frame(
+            model,
+            np.zeros((10, 10, 3), dtype=np.uint8),
+            0.25,
+            [0, 2],
+        )
+
+        self.assertIsNone(boxes)
+        self.assertEqual(model.kwargs["classes"], [0, 2])
+
+    def test_observation_marks_person_with_contained_iiac_as_worker(self):
+        class Box:
+            def __init__(self, xyxy, class_id, track_id):
+                self.xyxy = np.array([xyxy], dtype=float)
+                self.cls = np.array([class_id])
+                self.conf = np.array([0.9])
+                self.id = np.array([track_id])
+
+        observations = zone_monitor._observations_from_boxes(
+            [
+                Box((10, 10, 90, 90), 0, 1),
+                Box((30, 20, 50, 40), 1, 2),
+            ],
+            {0: "person", 1: "iiac_vest"},
+            (100, 100, 3),
+        )
+
+        self.assertEqual(observations[0].class_name, "worker")
+        self.assertEqual(observations[1].class_name, "iiac_vest")
 
     def test_manual_polygon_uses_normalized_click_coordinates(self):
         for point in ([10, 10], [90, 10], [50, 90]):
@@ -74,6 +112,36 @@ class ZoneMonitorTests(unittest.TestCase):
         self.assertEqual(missing, 0)
         with self.runtime.lock:
             self.assertAlmostEqual(self.runtime.zones[0]["anchors"][0]["point"][1], 0.82)
+
+    def test_detection_boxes_and_labels_scale_for_display_resize(self):
+        frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+        observation = zone_monitor.TrackObservation(
+            7,
+            1,
+            0.9,
+            "person",
+            (0.1, 0.2, 0.5, 0.8),
+        )
+        expected_scale = 1920 / zone_monitor.vision.DISPLAY_MAX_WIDTH
+
+        with (
+            patch("pipeline.zone_monitor.cv2.rectangle") as rectangle,
+            patch("pipeline.zone_monitor.cv2.putText") as put_text,
+        ):
+            zone_monitor._draw_track_observations(frame, [observation])
+
+        self.assertEqual(
+            rectangle.call_args.args[-1],
+            round(zone_monitor._DETECTION_BOX_THICKNESS * expected_scale),
+        )
+        self.assertAlmostEqual(
+            put_text.call_args.args[4],
+            zone_monitor._DETECTION_FONT_SCALE * expected_scale,
+        )
+        self.assertEqual(
+            put_text.call_args.args[-1],
+            round(zone_monitor._DETECTION_TEXT_THICKNESS * expected_scale),
+        )
 
     def test_tracked_mode_auto_selects_cone_tracks_in_polygon_order(self):
         with self.runtime.lock:

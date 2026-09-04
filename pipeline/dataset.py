@@ -1,14 +1,17 @@
+import json
 import shutil
-import random
 import cv2
 import numpy as np
 import yaml
 from pathlib import Path
 
+from pipeline import source_groups
+
 FRAMES_DIR  = Path("dataset/raw_frames")
 LABELS_DIR  = Path("dataset/labels")
 IMAGES_DIR  = Path("dataset/images")
 YAML_PATH   = Path("dataset/dataset.yaml")
+SPLIT_MANIFEST_PATH = Path("dataset/split_manifest.json")
 
 _CLASS_COLORS = [
     (255, 100,   0),
@@ -48,6 +51,23 @@ def _draw_bboxes(frame_bgr: np.ndarray, label_path: Path, class_names: list[str]
 def _has_label(stem: str) -> bool:
     lp = LABELS_DIR / (stem + ".txt")
     return lp.exists() and lp.stat().st_size > 0
+
+
+def source_choices() -> list[tuple[str, str]]:
+    """소스별 전체/라벨 프레임 수를 validation 선택지로 반환한다."""
+
+    frames = list(FRAMES_DIR.glob("frame_*.jpg"))
+    groups = source_groups.group_frames(frames)
+    choices = []
+    for source_id, group in groups.items():
+        labeled = sum(_has_label(frame.stem) for frame in group)
+        choices.append(
+            (
+                f"{source_id} — 전체 {len(group)}장 · 라벨 있음 {labeled}장",
+                source_id,
+            )
+        )
+    return choices
 
 
 def _gallery_frames(filter_empty: bool) -> list[Path]:
@@ -207,7 +227,31 @@ def delete_frame(frame_stem: str, prompts_str: str, filter_empty: bool):
     return gallery, stats, None, "", msg
 
 
-def build_dataset(prompts_str: str, val_ratio: float, filter_empty: bool):
+def _automatic_val_sources(
+    groups: dict[str, list[Path]],
+    val_ratio: float,
+) -> set[str]:
+    """프레임 수가 목표 비율에 가까워지도록 작은 소스부터 val에 배정한다."""
+
+    target = max(1, round(sum(map(len, groups.values())) * val_ratio))
+    ordered = sorted(groups, key=lambda source_id: (len(groups[source_id]), source_id))
+    selected: set[str] = set()
+    selected_count = 0
+    for source_id in ordered:
+        if len(selected) >= len(ordered) - 1:
+            break
+        if not selected or selected_count < target:
+            selected.add(source_id)
+            selected_count += len(groups[source_id])
+    return selected
+
+
+def build_dataset(
+    prompts_str: str,
+    val_ratio: float,
+    filter_empty: bool,
+    val_sources=None,
+):
     """
     train/val 분할 + dataset.yaml 생성.
     Yields status_str.
@@ -231,21 +275,44 @@ def build_dataset(prompts_str: str, val_ratio: float, filter_empty: bool):
         yield "라벨이 있는 프레임이 없습니다. 먼저 Tab 2에서 오토라벨링을 실행하세요."
         return
 
+    groups = source_groups.group_frames(frames)
+    if len(groups) < 2:
+        only_source = next(iter(groups), "없음")
+        yield (
+            "소스 단위 분리에는 최소 2개 소스가 필요합니다. "
+            f"현재 소스: {only_source}. 1단계에서 URL 또는 촬영 세션을 추가하세요."
+        )
+        return
+
+    requested_val = {str(value) for value in (val_sources or []) if value}
+    unknown_sources = requested_val - groups.keys()
+    if unknown_sources:
+        yield "존재하지 않는 validation 소스: " + ", ".join(sorted(unknown_sources))
+        return
+
+    selected_val = requested_val or _automatic_val_sources(groups, val_ratio)
+    if not selected_val or selected_val == set(groups):
+        yield "train과 validation에 각각 하나 이상의 소스를 배정해야 합니다."
+        return
+
+    train_sources = set(groups) - selected_val
+    train_frames = sorted(
+        frame for source_id in sorted(train_sources) for frame in groups[source_id]
+    )
+    val_frames = sorted(
+        frame for source_id in sorted(selected_val) for frame in groups[source_id]
+    )
+
     # 기존 분할 결과 삭제 — 누적/train·val 누수(같은 프레임이 양쪽에 섞임) 방지
     for split_name in ("train", "val"):
-        for d in (IMAGES_DIR / split_name, Path("dataset/labels") / split_name):
+        for d in (IMAGES_DIR / split_name, LABELS_DIR / split_name):
             if d.exists():
                 shutil.rmtree(d)
     yield "기존 train/val 폴더 정리 완료"
 
-    random.shuffle(frames)
-    split = max(1, int(len(frames) * (1 - val_ratio)))
-    train_frames = frames[:split]
-    val_frames   = frames[split:]
-
     for split_name, split_frames in [("train", train_frames), ("val", val_frames)]:
         img_dir = IMAGES_DIR / split_name
-        lbl_dir = Path("dataset/labels") / split_name
+        lbl_dir = LABELS_DIR / split_name
         img_dir.mkdir(parents=True, exist_ok=True)
         lbl_dir.mkdir(parents=True, exist_ok=True)
 
@@ -261,7 +328,7 @@ def build_dataset(prompts_str: str, val_ratio: float, filter_empty: bool):
 
     names_yaml = "\n".join(f"  {i}: {n}" for i, n in enumerate(prompts))
     yaml_content = (
-        f"path: {Path('dataset').resolve().as_posix()}\n"
+        f"path: {YAML_PATH.parent.resolve().as_posix()}\n"
         f"train: images/train\n"
         f"val:   images/val\n"
         f"\nnc: {len(prompts)}\n"
@@ -269,7 +336,23 @@ def build_dataset(prompts_str: str, val_ratio: float, filter_empty: bool):
     )
     YAML_PATH.write_text(yaml_content, encoding="utf-8")
 
+    split_manifest = {
+        "version": 1,
+        "filter_empty": bool(filter_empty),
+        "classes": prompts,
+        "train_sources": sorted(train_sources),
+        "val_sources": sorted(selected_val),
+        "train_frames": len(train_frames),
+        "val_frames": len(val_frames),
+    }
+    SPLIT_MANIFEST_PATH.write_text(
+        json.dumps(split_manifest, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
     yield (
         f"완료 — train {len(train_frames)}장 / val {len(val_frames)}장\n"
+        f"train 소스: {', '.join(sorted(train_sources))}\n"
+        f"val 소스: {', '.join(sorted(selected_val))}\n"
         f"dataset.yaml → {YAML_PATH.resolve()}"
     )
