@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from pathlib import Path
+from urllib.parse import urlparse, parse_qs
 
 
 LEGACY_SOURCE_ID = "legacy"
@@ -54,3 +55,29 @@ def filter_frames(frames: list[Path], selected_sources=None) -> list[Path]:
         for frame in sorted(frames)
         if source_id_from_path(frame) in selected
     ]
+
+
+def youtube_identity(value: str) -> str:
+    """공유/shorts/watch URL과 시간 매개변수를 같은 영상 ID로 정규화한다."""
+    parsed = urlparse(value)
+    host = (parsed.hostname or "").lower()
+    if host == "youtu.be":
+        return parsed.path.strip("/").split("/")[0]
+    if host == "youtube.com" or host.endswith(".youtube.com"):
+        parts = parsed.path.strip("/").split("/")
+        if parts[0] in {"shorts", "embed", "live"} and len(parts) > 1:
+            return parts[1]
+        video_id = parse_qs(parsed.query).get("v")
+        if video_id:
+            return video_id[0]
+    return value
+
+
+def source_origin(record):
+    source_type = record.get("type")
+    value = record.get("origin", record.get("value", record["id"]))
+    if source_type == "YouTube URL":
+        value = youtube_identity(value)
+    elif source_type != "비디오 파일":
+        value = record["id"]
+    return source_type, value

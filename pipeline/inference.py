@@ -58,7 +58,7 @@ def predict(
     source_type: str,
     youtube_url: str,
     conf: float,
-    infer_every: int,
+    detection_interval: float = 1.0,
     folder_files=None,
     webcam_index=None,
     video_file=None,
@@ -89,7 +89,8 @@ def predict(
 
     if source_type == media.SOURCE_IMAGES:
         yield from _predict_folder(
-            model, names, class_ids, folder_files, float(conf)
+            model, names, class_ids, folder_files, float(conf),
+            max(0.1, float(detection_interval)),
         )
         return
 
@@ -108,7 +109,8 @@ def predict(
                 class_ids,
                 capture,
                 float(conf),
-                max(1, int(infer_every)),
+                max(0.1, float(detection_interval)),
+                pace_reads=source.pace_reads,
                 browser_webcam=isinstance(
                     source.value,
                     webcams.BrowserWebcamSource,
@@ -128,8 +130,9 @@ def _predict_video(
     class_ids: list[int],
     capture,
     conf: float,
-    infer_every: int,
+    detection_interval: float = 1.0,
     browser_webcam: bool = False,
+    pace_reads: bool = False,
 ):
     yield None, "추론 시작...", ""
 
@@ -139,21 +142,11 @@ def _predict_video(
     inference_ms = 0.0
     last_preview_at = 0.0
 
-    while not _stop_event.is_set():
-        ok, frame_bgr = capture.read()
-        if not ok:
-            if frame_index == 0 and browser_webcam:
-                yield (
-                    None,
-                    "접속 기기 카메라 프레임을 받지 못했습니다. "
-                    "카메라 미리보기가 보이는지 확인한 뒤 다시 시작하세요.",
-                    "",
-                )
-                return
-            break
-
-        if frame_index % infer_every == 0:
-            started_at = time.perf_counter()
+    next_detection_at = 0.0
+    for frame_bgr in media.video_frames(capture, _stop_event, pace_reads):
+        started_at = time.perf_counter()
+        if frame_index == 0 or started_at >= next_detection_at:
+            next_detection_at = started_at + detection_interval
             results = model(
                 frame_bgr,
                 conf=conf,
@@ -170,7 +163,7 @@ def _predict_video(
                 yield (
                     None,
                     f"프레임 {frame_index + 1}  |  감지 {last_detection_count}개 "
-                    f"|  추론 {inference_ms:.0f}ms  |  skip={infer_every}",
+                    f"|  추론 {inference_ms:.0f}ms  |  탐지 주기={detection_interval:g}초",
                     _browser_overlay_svg(frame_bgr, last_boxes, names),
                 )
 
@@ -181,11 +174,15 @@ def _predict_video(
             yield (
                 vision.to_rgb(annotated),
                 f"프레임 {frame_index + 1}  |  감지 {last_detection_count}개 "
-                f"|  추론 {inference_ms:.0f}ms  |  skip={infer_every}",
+                f"|  추론 {inference_ms:.0f}ms  |  탐지 주기={detection_interval:g}초",
                 "",
             )
 
         frame_index += 1
+
+    if frame_index == 0 and browser_webcam and not _stop_event.is_set():
+        yield None, "접속 기기 카메라 프레임을 받지 못했습니다. 카메라 미리보기를 확인하고 다시 시작하세요.", ""
+        return
 
     prefix = "중지됨" if _stop_event.is_set() else "완료"
     yield None, f"추론 {prefix} — 총 {frame_index}프레임 처리", ""
@@ -197,6 +194,7 @@ def _predict_folder(
     class_ids: list[int],
     folder_files,
     conf: float,
+    detection_interval: float = 1.0,
 ):
     images = media.filter_image_paths(folder_files)
     if not images:
@@ -234,6 +232,6 @@ def _predict_folder(
                 f"|  추론 {inference_ms:.0f}ms  ({shown_count})",
                 "",
             )
-            _stop_event.wait(0.4)
+            _stop_event.wait(max(0.0, detection_interval - (time.perf_counter() - started_at)))
 
     yield None, f"중지됨 — {shown_count}장 표시", ""

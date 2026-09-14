@@ -30,7 +30,7 @@ def _safe_name(name: str) -> str:
 
 _ROOT     = Path(__file__).resolve().parent.parent
 _PROJECT  = _ROOT / "runs" / "detect"
-_MODEL_PT = _ROOT / "models/yolo26n.pt"
+_MODEL_PT = _ROOT / "models/yolo26m.pt"
 _RUNTIME_DIR = _PROJECT / ".runtime"
 _STATE_PATH = _RUNTIME_DIR / "training_state.json"
 _LOG_PATH = _RUNTIME_DIR / "training.log"
@@ -265,7 +265,7 @@ def train(epochs: int, imgsz: int, batch: int, patience: int, device: str,
         yield message
         return
 
-    # 베이스 가중치 결정 — 지정 시 그 위에 이어학습(파인튜닝), 비우면 사전학습 yolo26n.pt
+    # 베이스 가중치 결정 — 지정 시 그 위에 이어학습(파인튜닝), 비우면 사전학습 yolo26m.pt
     base = (base_model or "").strip()
     if base:
         base_path = Path(base)
@@ -276,7 +276,7 @@ def train(epochs: int, imgsz: int, batch: int, patience: int, device: str,
             return
     else:
         if not _MODEL_PT.exists():
-            message = f"모델 파일 없음: {_MODEL_PT}\nmodels/ 폴더에 yolo26n.pt를 배치하세요."
+            message = f"모델 파일 없음: {_MODEL_PT}\nmodels/ 폴더에 yolo26m.pt를 배치하세요."
             fail(message)
             yield message + "\n"
             return

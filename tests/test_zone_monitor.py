@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import unittest
+from contextlib import nullcontext
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -166,7 +168,7 @@ class ZoneMonitorTests(unittest.TestCase):
             points = [tuple(anchor["point"]) for anchor in self.runtime.draft_anchors]
         self.assertGreater(zone_monitor._polygon_area(points), 0.0001)
 
-    def test_auto_selection_ignores_non_safety_cone_class(self):
+    def test_auto_selection_uses_selected_trained_class(self):
         with self.runtime.lock:
             self.runtime.edit_tracks = [
                 zone_monitor.TrackObservation(
@@ -184,14 +186,17 @@ class ZoneMonitorTests(unittest.TestCase):
             zone_monitor.MODE_TRACKED,
         )
         with self.runtime.lock:
-            self.assertEqual(self.runtime.draft_anchors, [])
+            self.assertEqual({a["class_id"] for a in self.runtime.draft_anchors}, {7})
+            self.runtime.anchor_class_id = 0
+        zone_monitor.auto_select_tracked_anchors(self.session_id, zone_monitor.MODE_TRACKED)
+        self.assertEqual(self.runtime.draft_anchors, [])
 
-    def test_stream_update_creates_and_refreshes_safety_cone_zone(self):
-        run_id, stop_event = zone_monitor._begin_stream(self.runtime)
+    def test_stream_update_creates_and_refreshes_trained_class_zone(self):
+        run_id, stop_event = zone_monitor._begin_stream(self.runtime, 0)
         observations = [
-            zone_monitor.TrackObservation(1, 0, 0.9, "Safety Cone", (0.0, 0.6, 0.2, 0.8)),
-            zone_monitor.TrackObservation(2, 0, 0.9, "Safety Cone", (0.4, 0.1, 0.6, 0.3)),
-            zone_monitor.TrackObservation(3, 0, 0.9, "Safety Cone", (0.8, 0.6, 1.0, 0.8)),
+            zone_monitor.TrackObservation(1, 0, 0.9, "경계 표지", (0.0, 0.6, 0.2, 0.8)),
+            zone_monitor.TrackObservation(2, 0, 0.9, "경계 표지", (0.4, 0.1, 0.6, 0.3)),
+            zone_monitor.TrackObservation(3, 0, 0.9, "경계 표지", (0.8, 0.6, 1.0, 0.8)),
         ]
 
         updated = zone_monitor._update_tracking_and_latest(
@@ -205,7 +210,7 @@ class ZoneMonitorTests(unittest.TestCase):
         self.assertTrue(updated)
         with self.runtime.lock:
             self.assertEqual(len(self.runtime.zones), 1)
-            self.assertEqual(self.runtime.zones[0]["label"], "Safety Cone zone")
+            self.assertEqual(self.runtime.zones[0]["label"], "경계 표지 zone")
             first_zone_id = self.runtime.zones[0]["id"]
 
         moved = [
@@ -233,6 +238,85 @@ class ZoneMonitorTests(unittest.TestCase):
                 for anchor in self.runtime.zones[0]["anchors"]
             }
             self.assertAlmostEqual(moved_by_id[1][0], 0.11)
+
+    def test_browser_overlay_matches_raster_intrusion_counts_and_escapes_labels(self):
+        frame = np.zeros((100, 200, 3), dtype=np.uint8)
+        self.runtime.zones = [{
+            "mode": zone_monitor.MODE_MANUAL,
+            "label": "표지 <script>",
+            "points": [(0.1, 0.1), (0.9, 0.1), (0.9, 0.9), (0.1, 0.9)],
+        }]
+        observations = [zone_monitor.TrackObservation(10, 7, 0.9, "작업자 <test>", (0.4, 0.4, 0.6, 0.6))]
+        svg, *counts = zone_monitor._browser_overlay_svg(self.runtime, frame, observations)
+        _, *raster_counts = zone_monitor._render_zones(self.runtime, frame, observations)
+        self.assertEqual(counts, raster_counts)
+        self.assertEqual(counts, [1, 1, 0])
+        self.assertIn('fill="#dc0000"', svg)
+        self.assertIn('viewBox="0 0 200 100"', svg)
+        self.assertIn("작업자 &lt;test&gt;", svg)
+        self.assertNotIn("<script>", svg)
+
+    def test_browser_stream_sends_overlay_and_keeps_snapshot_frame(self):
+        from pipeline import webcams
+        frame = np.zeros((100, 200, 3), dtype=np.uint8)
+        class Capture:
+            def __init__(self):
+                self.frames = iter([(True, frame), (False, None)])
+            def read(self):
+                return next(self.frames)
+        model = SimpleNamespace(names={7: "학습 표지"})
+        source = SimpleNamespace(value=webcams.BrowserWebcamSource("test", "zone", "camera"), pace_reads=False)
+        with patch("ultralytics.YOLO", return_value=model), \
+             patch.object(zone_monitor.Path, "is_file", return_value=True), \
+             patch.object(zone_monitor.media, "resolve_video_source", return_value=source), \
+             patch.object(zone_monitor.media, "open_video_capture", return_value=nullcontext(Capture())), \
+             patch.object(zone_monitor, "_track_frame", return_value=None):
+            outputs = list(zone_monitor.stream(
+                self.session_id, "웹캠", "", "model.pt", 0.5, 1, anchor_class_id=7,
+            ))
+        self.assertTrue(all(len(output) == 3 for output in outputs))
+        self.assertIsNone(outputs[1][0])
+        self.assertIn("<svg", outputs[1][2])
+        self.assertIsNotNone(self.runtime.last_frame)
+        self.assertEqual(self.runtime.anchor_class_id, 7)
+        self.assertEqual(outputs[-1][2], "")
+
+    def test_default_tracking_uses_seconds_even_with_active_zone(self):
+        clock = [10.0]
+        calls = []
+        class Capture:
+            def __init__(self):
+                self.times = iter([10.0, 10.4, 10.9, 11.0, 11.7, 12.0])
+            def read(self):
+                try:
+                    clock[0] = next(self.times)
+                    return True, np.zeros((100, 100, 3), dtype=np.uint8)
+                except StopIteration:
+                    return False, None
+        observations = [
+            zone_monitor.TrackObservation(1, 7, 0.9, "traffic_cone", (0.0, 0.6, 0.2, 0.8)),
+            zone_monitor.TrackObservation(2, 7, 0.9, "traffic_cone", (0.4, 0.1, 0.6, 0.3)),
+            zone_monitor.TrackObservation(3, 7, 0.9, "traffic_cone", (0.8, 0.6, 1.0, 0.8)),
+        ]
+        def track(*_args):
+            calls.append(clock[0])
+            return None
+        source = SimpleNamespace(value=0, pace_reads=False)
+        with patch("ultralytics.YOLO", return_value=SimpleNamespace(names={7: "traffic_cone"})), \
+             patch.object(zone_monitor.Path, "is_file", return_value=True), \
+             patch.object(zone_monitor.time, "perf_counter", side_effect=lambda: clock[0]), \
+             patch.object(zone_monitor.media, "resolve_video_source", return_value=source), \
+             patch.object(zone_monitor.media, "open_video_capture", return_value=nullcontext(Capture())), \
+             patch.object(zone_monitor, "_observations_from_boxes", return_value=observations), \
+             patch.object(zone_monitor, "_track_frame", side_effect=track):
+            outputs = list(zone_monitor.stream(
+                self.session_id, "웹캠", "", "model.pt", 0.5, anchor_class_id=7,
+            ))
+        self.assertEqual(calls, [10.0, 11.0, 12.0])
+        self.assertEqual(len(self.runtime.zones), 1)
+        previews = [o for o in outputs if o[0] is not None]
+        self.assertGreater(len(previews), len(calls))
+        self.assertTrue(all("탐지 주기=1초" in o[1] for o in previews))
 
     def test_track_id_reuse_by_another_class_marks_anchor_missing(self):
         anchor = {

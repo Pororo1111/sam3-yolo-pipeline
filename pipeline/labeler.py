@@ -3,7 +3,7 @@ import cv2
 import numpy as np
 from pathlib import Path
 
-from pipeline import source_groups
+from pipeline import source_groups, data_store
 
 FRAMES_DIR = Path("dataset/raw_frames")
 LABELS_DIR = Path("dataset/labels")
@@ -37,7 +37,14 @@ def stop():
 def source_choices() -> list[tuple[str, str]]:
     """현재 추출 프레임의 소스 그룹 선택지를 반환한다."""
 
-    return source_groups.source_choices(FRAMES_DIR)
+    groups = source_groups.group_frames(list(FRAMES_DIR.glob("frame_*.jpg")))
+    return [(f"{key} — 전체 {len(frames)}장 · 미처리 {sum(not (LABELS_DIR / (f.stem + '.txt')).exists() for f in frames)}장", key)
+            for key, frames in groups.items()]
+
+
+def pending_sources():
+    return sorted({source_groups.source_id_from_path(f) for f in FRAMES_DIR.glob("frame_*.jpg")
+                   if not (LABELS_DIR / (f.stem + ".txt")).exists()})
 
 
 def _frames_for_sources(selected_sources=None) -> list[Path]:
@@ -154,13 +161,13 @@ def preview(
 
     yield gallery, (
         f"미리보기 완료 — {len(gallery)}장 샘플 · 총 {total_obj}개 객체. "
-        f"결과가 괜찮으면 「전체 라벨링 시작」을 누르세요. (아직 라벨은 저장되지 않았습니다)"
+        f"결과가 괜찮으면 「라벨링 시작」을 누르세요. (아직 라벨은 저장되지 않았습니다)"
     )
 
 
-def label(prompts_str: str, conf: float, selected_sources=None):
+def label(prompts_str: str, conf: float, selected_sources=None, mode="미처리만"):
     """
-    전체 라벨링 — 모든 프레임에 추론하고 라벨 파일을 저장한다.
+    선택 소스의 미처리 프레임을 처리하거나 명시적으로 재라벨링한다.
     Generator — yields (rgb_preview | None, status_str)
     prompts_str: "person, car, bicycle"  (쉼표 구분)
     """
@@ -178,11 +185,16 @@ def label(prompts_str: str, conf: float, selected_sources=None):
 
     LABELS_DIR.mkdir(parents=True, exist_ok=True)
 
-    # 선택한 소스만 다시 라벨링한다. 다른 URL/웹캠 세션의 결과는 보존한다.
-    for frame in frames:
-        old = LABELS_DIR / f"{frame.stem}.txt"
-        if old.exists():
-            old.unlink()
+    if mode == "미처리만":
+        frames = [f for f in frames if not (LABELS_DIR / (f.stem + ".txt")).exists()]
+    if not frames:
+        yield None, "선택한 소스의 라벨링이 이미 완료되었습니다."
+        return
+    try:
+        mapping = data_store.map_prompts(LABELS_DIR.parent, prompts)
+    except (ValueError, OSError) as exc:
+        yield None, str(exc)
+        return
 
     yield None, "SAM3 모델 로딩 중..."
 
@@ -210,7 +222,11 @@ def label(prompts_str: str, conf: float, selected_sources=None):
 
         # 라벨 파일 저장 (마스크 없으면 빈 파일)
         label_path = LABELS_DIR / (frame_path.stem + ".txt")
-        label_path.write_text("\n".join(label_lines))
+        mapped_lines = []
+        for line in label_lines:
+            local_id, coords = line.split(" ", 1)
+            mapped_lines.append(f"{mapping[int(local_id)]} {coords}")
+        data_store.atomic_text(label_path, "\n".join(mapped_lines))
 
         done += 1
         yield rgb, f"{done} / {total}  |  {frame_path.name}  →  {n_obj}개 객체"

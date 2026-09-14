@@ -114,10 +114,11 @@ class SourceAwareLabelerTests(unittest.TestCase):
                 stem = f"frame_{source_id}_00000"
                 cv2.imwrite(str(frames_dir / f"{stem}.jpg"), image)
                 (labels_dir / f"{stem}.txt").write_text(
-                    f"old-{source_id}",
+                    "0 0.1 0.1 0.1 0.1",
                     encoding="utf-8",
                 )
 
+            (root / "dataset.yaml").write_text("names: [white hardhat]\n")
             inferred = (
                 np.zeros((8, 8, 3), dtype=np.uint8),
                 ["0 0.5 0.5 0.2 0.2"],
@@ -133,7 +134,7 @@ class SourceAwareLabelerTests(unittest.TestCase):
                     return_value=inferred,
                 ),
             ):
-                list(labeler.label("white hardhat", 0.25, ["yt001"]))
+                list(labeler.label("white hardhat", 0.25, ["yt001"], "선택 소스 재라벨링"))
 
             self.assertEqual(
                 (labels_dir / "frame_yt001_00000.txt").read_text(),
@@ -141,7 +142,7 @@ class SourceAwareLabelerTests(unittest.TestCase):
             )
             self.assertEqual(
                 (labels_dir / "frame_yt002_00000.txt").read_text(),
-                "old-yt002",
+                "0 0.1 0.1 0.1 0.1",
             )
 
 

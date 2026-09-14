@@ -216,3 +216,18 @@ def capture_fps(capture: cv2.VideoCapture, fallback: float = 30.0) -> float:
 
     fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
     return fps if fps >= 1.0 else fallback
+
+
+def video_frames(capture, stop_event, pace_reads: bool = False):
+    """파일/YouTube는 재생 FPS로 읽고, 대기 중에도 중지 요청을 처리한다."""
+    interval = 1.0 / capture_fps(capture) if pace_reads else 0.0
+    next_read_at = time.perf_counter()
+    while not stop_event.is_set():
+        if pace_reads and stop_event.wait(max(0.0, next_read_at - time.perf_counter())):
+            return
+        ok, frame = capture.read()
+        if not ok:
+            return
+        if pace_reads:
+            next_read_at = max(next_read_at + interval, time.perf_counter())
+        yield frame

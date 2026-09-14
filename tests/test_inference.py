@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 
@@ -25,6 +26,33 @@ class _SingleFrameCapture:
 
 
 class InferenceTests(unittest.TestCase):
+    def setUp(self):
+        inference._stop_event.clear()
+
+    def test_default_detection_uses_elapsed_seconds_and_reuses_boxes(self):
+        clock = [0.0]
+        calls = []
+        box = SimpleNamespace(xyxy=np.array([[1, 1, 5, 5]]), cls=np.array([0]), conf=np.array([0.9]), id=None)
+        class Capture:
+            def __init__(self):
+                self.times = iter([0.0, 0.4, 0.9, 1.0, 1.7, 2.0])
+            def read(self):
+                try:
+                    clock[0] = next(self.times)
+                    return True, np.zeros((10, 10, 3), dtype=np.uint8)
+                except StopIteration:
+                    return False, None
+        def model(_frame, **_kwargs):
+            calls.append(clock[0])
+            return [SimpleNamespace(boxes=[box])]
+        with patch.object(inference.time, "perf_counter", side_effect=lambda: clock[0]):
+            outputs = list(inference._predict_video(model, {0: "object"}, [0], Capture(), 0.5))
+        self.assertEqual(calls, [0.0, 1.0, 2.0])
+        previews = [output for output in outputs if output[0] is not None]
+        self.assertGreater(len(previews), len(calls))
+        self.assertTrue(all("감지 1개" in output[1] for output in previews))
+        self.assertTrue(all("탐지 주기=1초" in output[1] for output in previews))
+
     def test_browser_webcam_timeout_reports_actionable_status(self):
         outputs = list(
             inference._predict_video(
@@ -33,7 +61,7 @@ class InferenceTests(unittest.TestCase):
                 class_ids=[],
                 capture=_EmptyCapture(),
                 conf=0.25,
-                infer_every=3,
+                detection_interval=3,
                 browser_webcam=True,
             )
         )
@@ -79,7 +107,7 @@ class InferenceTests(unittest.TestCase):
                 class_ids=[0],
                 capture=_SingleFrameCapture(frame),
                 conf=0.25,
-                infer_every=1,
+                detection_interval=1,
                 browser_webcam=True,
             )
         )

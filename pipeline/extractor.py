@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-import json
+from contextlib import contextmanager
+from datetime import datetime, timezone
+import hashlib
+from pipeline import data_store, source_groups
+
 import shutil
 import threading
 import time
@@ -92,16 +96,8 @@ def capture(
             if not _controller.prepare_output():
                 yield None, stop()
                 return
-            source_id = "images001"
-            copied_count = yield from _import_images(images, source_id)
-            _write_sources_manifest([
-                {
-                    "id": source_id,
-                    "type": source_type,
-                    "value": "업로드 이미지",
-                    "frame_count": copied_count,
-                }
-            ])
+            with _source_record("images", source_type, "업로드 이미지") as source_id:
+                yield from _import_images(images, source_id)
             return
 
         if source_type == media.SOURCE_YOUTUBE:
@@ -130,26 +126,13 @@ def capture(
                 if not _controller.prepare_output():
                     yield None, stop()
                     return
-                source_id = (
-                    "webcam001"
-                    if source_type == media.SOURCE_WEBCAM
-                    else "video001"
-                )
-                saved_count, _last_preview = yield from _capture_video(
-                    video,
-                    source,
-                    max(1, int(capture_fps)),
-                    source_id,
-                    first_frame=first_frame,
-                )
-                _write_sources_manifest([
-                    {
-                        "id": source_id,
-                        "type": source_type,
-                        "value": str(video_file or webcam_index or ""),
-                        "frame_count": saved_count,
-                    }
-                ])
+                prefix = "webcam" if source_type == media.SOURCE_WEBCAM else "video"
+                identity = str(webcam_index) if prefix == "webcam" else _video_identity(video_file)
+                with _source_record(prefix, source_type, identity) as source_id:
+                    yield from _capture_video(
+                        video, source, max(1, int(capture_fps)), source_id,
+                        first_frame=first_frame,
+                    )
         except media.MediaSourceError as exc:
             yield None, str(exc)
     except GeneratorExit:
@@ -159,18 +142,50 @@ def capture(
 
 
 def _reset_output_directory() -> None:
+    """기존 이미지와 라벨을 보존하며 출력 폴더만 준비한다."""
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    for path in OUT_DIR.glob("frame_*.jpg"):
-        path.unlink()
-    # raw_frames 전체를 새 캡처 묶음으로 교체하므로 대응하는 평면 라벨도 제거한다.
-    # labels/train, labels/val 하위의 이미 구성된 데이터셋은 보존한다.
-    labels_dir = OUT_DIR.parent / "labels"
-    if labels_dir.exists():
-        for path in labels_dir.glob("*.txt"):
-            path.unlink()
-    manifest_path = OUT_DIR.parent / "sources.json"
-    if manifest_path.exists():
-        manifest_path.unlink()
+
+
+@contextmanager
+def _source_record(prefix, source_type, value):
+    path = OUT_DIR.parent / "sources.json"
+    payload = data_store.read_json(path, {"version": 2, "sources": []})
+    for previous in payload["sources"]:
+        previous["frame_count"] = len(list(OUT_DIR.glob(f"frame_{previous['id']}_*.jpg")))
+        if previous.get("status") == "capturing":
+            previous["status"] = "interrupted"
+    existing = {r["id"] for r in payload["sources"]}
+    for key, frames in source_groups.group_frames(list(OUT_DIR.glob("frame_*.jpg"))).items():
+        if key not in existing:
+            payload["sources"].append({"id": key, "type": "기존 데이터", "value": key,
+                "origin": key, "created_at": None, "frame_count": len(frames), "status": "legacy"})
+            existing.add(key)
+    index = 1
+    while f"{prefix}{index:03d}" in existing:
+        index += 1
+    source_id = f"{prefix}{index:03d}"
+    record = {"id": source_id, "type": source_type, "value": value,
+              "created_at": datetime.now(timezone.utc).isoformat(),
+              "frame_count": 0, "status": "capturing"}
+    record["origin"] = source_groups.youtube_identity(value) if prefix == "yt" else (value if prefix == "video" else source_id)
+    payload["sources"].append(record)
+    data_store.save_json(path, payload)
+    completed = False
+    try:
+        yield source_id
+        completed = not _controller.stop_event.is_set()
+    finally:
+        record["frame_count"] = len(list(OUT_DIR.glob(f"frame_{source_id}_*.jpg")))
+        record["status"] = "complete" if completed else "interrupted"
+        data_store.save_json(path, payload)
+
+
+def _video_identity(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def _parse_youtube_urls(value: str) -> list[str]:
@@ -184,16 +199,6 @@ def _parse_youtube_urls(value: str) -> list[str]:
             seen.add(url)
             urls.append(url)
     return urls
-
-
-def _write_sources_manifest(records: list[dict]) -> None:
-    path = OUT_DIR.parent / "sources.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"version": 1, "sources": records}
-    path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
 
 
 def _capture_youtube_urls(urls: list[str], target_fps: int):
@@ -211,7 +216,7 @@ def _capture_youtube_urls(urls: list[str], target_fps: int):
 
         source_id = f"yt{index:03d}"
         yield last_preview, (
-            f"YouTube {index}/{len(urls)} 스트림 URL 추출 중...  |  {source_id}"
+            f"YouTube {index}/{len(urls)} 스트림 URL 추출 중..."
         )
         try:
             source = media.resolve_video_source(
@@ -230,26 +235,15 @@ def _capture_youtube_urls(urls: list[str], target_fps: int):
                         return
                     prepared = True
 
-                result = yield from _capture_video(
-                    video,
-                    source,
-                    target_fps,
-                    source_id,
-                    saved_offset=total_saved,
-                    first_frame=first_frame,
-                    source_position=(index, len(urls)),
-                )
-                saved_count, last_preview = result
-                total_saved += saved_count
-                records.append(
-                    {
-                        "id": source_id,
-                        "type": media.SOURCE_YOUTUBE,
-                        "value": url,
-                        "frame_count": saved_count,
-                    }
-                )
-                _write_sources_manifest(records)
+                with _source_record("yt", media.SOURCE_YOUTUBE, url) as source_id:
+                    result = yield from _capture_video(
+                        video, source, target_fps, source_id,
+                        saved_offset=total_saved, first_frame=first_frame,
+                        source_position=(index, len(urls)),
+                    )
+                    saved_count, last_preview = result
+                    total_saved += saved_count
+                    records.append({"id": source_id})
         except media.MediaSourceError as exc:
             errors.append(f"{source_id}: {exc}")
             yield last_preview, f"{source_id} 처리 실패 — {exc}"

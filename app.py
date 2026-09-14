@@ -13,6 +13,7 @@ from pipeline import (
     models,
     trainer,
     webcams,
+    vision,
     zone_monitor,
 )
 
@@ -81,7 +82,9 @@ def run_capture(
     webcam_index,
     video_file,
 ):
-    yield from extractor.capture(
+    frame, status = None, "수집 완료"
+    before = {value for _, value in labeler.source_choices()}
+    for frame, status in extractor.capture(
         source_type,
         youtube_url,
         int(capture_fps),
@@ -89,12 +92,16 @@ def run_capture(
         webcam_index,
         video_file,
         browser_session_id,
-    )
+    ):
+        yield frame, status
+    choices = labeler.source_choices()
+    total = len(list(extractor.OUT_DIR.glob("frame_*.jpg")))
+    yield frame, status + f"  |  신규 소스 {len({value for _, value in choices} - before)}개 · 누적 {len(choices)}개 소스 / {total}장"
 
 
 def prepare_capture_preview():
     """공용 이미지 스트림을 비우고 새 캡처를 준비한다."""
-    return None, "실시간 미리보기를 준비합니다."
+    return None, "기존 데이터를 보존하고 새 프레임을 추가합니다.", [value for _, value in labeler.source_choices()]
 
 
 def stop_capture_and_reset():
@@ -109,7 +116,7 @@ def run_inference(
     source_type,
     youtube_url,
     conf,
-    infer_every,
+    detection_interval,
     folder_files,
     webcam_index,
     video_file,
@@ -119,7 +126,7 @@ def run_inference(
         source_type,
         youtube_url,
         conf,
-        infer_every,
+        detection_interval,
         folder_files,
         webcam_index,
         video_file,
@@ -134,10 +141,11 @@ def run_zone_stream(
     youtube_url,
     model_path,
     conf,
-    infer_every,
+    detection_interval,
     folder_files,
     webcam_index,
     video_file,
+    anchor_class_id,
 ):
     yield from zone_monitor.stream(
         session_id,
@@ -145,12 +153,40 @@ def run_zone_stream(
         youtube_url,
         model_path,
         conf,
-        infer_every,
+        detection_interval,
         folder_files,
         webcam_index,
         video_file,
         browser_session_id,
+        anchor_class_id,
     )
+
+
+def refresh_zone_classes(model_path):
+    """선택한 모델 가중치에 저장된 실제 클래스 ID와 이름을 읽는다."""
+    resolved = (model_path or "").strip()
+    if not resolved or not Path(resolved).is_file():
+        return gr.update(choices=[], value=None), "학습된 모델을 먼저 선택하세요."
+    try:
+        from ultralytics import YOLO
+
+        names = YOLO(resolved).names or {}
+        choices = [
+            (str(names[class_id]), class_id)
+            for class_id in vision.inference_class_ids(names)
+        ]
+    except Exception as exc:
+        return gr.update(choices=[], value=None), f"모델 클래스 로딩 실패: {exc}"
+    value = choices[0][1] if len(choices) == 1 else None
+    return gr.update(choices=choices, value=value), "자동 영역의 경계로 사용할 학습 클래스를 선택하세요."
+
+
+def prepare_zone_stream(session_id):
+    return (*zone_monitor.prepare_stream(session_id), "")
+
+
+def reset_zone_stream(session_id):
+    return (*zone_monitor.reset(session_id), "")
 
 
 def load_classes(label_prompts):
@@ -239,7 +275,7 @@ def receive_browser_camera_frame(browser_session_id, webcam_value, frame_rgb):
 
 def _base_model_choices():
     """학습 탭 베이스 모델 드롭다운 choices — 첫 항목은 '처음부터'(값=빈 문자열)."""
-    return [("yolo26n.pt (사전학습 · 처음부터)", "")] + models.list_trained_models()
+    return [("yolo26m.pt (사전학습 · 처음부터)", "")] + models.list_trained_models()
 
 
 def refresh_base_model_dropdown():
@@ -443,8 +479,8 @@ def update_dataset_selection_status(records, selected):
     return summary, summary
 
 
-def run_label(prompts_str, conf, selected_sources):
-    yield from labeler.label(prompts_str, float(conf), selected_sources)
+def run_label(prompts_str, conf, selected_sources, mode):
+    yield from labeler.label(prompts_str, float(conf), selected_sources, mode)
 
 
 def on_gallery_select(prompts_str, filter_empty, evt: gr.SelectData):
@@ -470,7 +506,7 @@ def refresh_label_source_choices(current_selection=None):
     choices = labeler.source_choices()
     values = [value for _label, value in choices]
     selected = [value for value in (current_selection or []) if value in values]
-    if not selected:
+    if current_selection is None:
         selected = values
     return gr.update(choices=choices, value=selected)
 
@@ -700,13 +736,30 @@ _BROWSER_CAMERA_DISCOVERY_JS = r"""async (_previous) => {
 }"""
 
 
+_AUTO_START_CAPTURE_CAMERA_JS = r"""(
+    browserSessionId, sourceType, youtubeUrl, captureFps,
+    folderFiles, webcamValue, videoFile
+) => {
+    if (sourceType === "웹캠" && String(webcamValue || "").startsWith("browser:")) {
+        const startIcon = document.querySelector(
+            '#capture_browser_camera [title="start recording"]'
+        );
+        startIcon?.closest("button")?.click();
+    }
+    return [
+        browserSessionId, sourceType, youtubeUrl, captureFps,
+        folderFiles, webcamValue, videoFile,
+    ];
+}"""
+
+
 _AUTO_START_INFERENCE_CAMERA_JS = r"""(
     browserSessionId,
     modelPath,
     sourceType,
     youtubeUrl,
     conf,
-    inferEvery,
+    detectionInterval,
     folderFiles,
     webcamValue,
     videoFile
@@ -724,11 +777,91 @@ _AUTO_START_INFERENCE_CAMERA_JS = r"""(
         sourceType,
         youtubeUrl,
         conf,
-        inferEvery,
+        detectionInterval,
         folderFiles,
         webcamValue,
         videoFile,
     ];
+}"""
+
+
+_AUTO_START_ZONE_CAMERA_JS = r"""(...args) => {
+    const stage = document.getElementById('zone_browser_stage');
+    if (stage?.getClientRects().length) {
+        const startIcon = stage.querySelector('[title="start recording"]');
+        startIcon?.closest("button")?.click();
+    }
+    return args;
+}"""
+
+
+_WEBCAM_FULLSCREEN_JS = r"""() => {
+    // Webcam inputs do not expose Gradio's image fullscreen toolbar.
+    if (window.__webcamFullscreenInstalled) return;
+    window.__webcamFullscreenInstalled = true;
+    let active = null;
+    const fullscreenElement = () => document.fullscreenElement || document.webkitFullscreenElement;
+    const reset = () => {
+        if (!active) return;
+        active.classList.remove('webcam-expanded');
+        const button = active.querySelector('.webcam-fullscreen-button');
+        if (button) {
+            button.textContent = '전체화면';
+            button.setAttribute('aria-pressed', 'false');
+        }
+        active = null;
+    };
+    const close = async () => {
+        try {
+            if (fullscreenElement()) {
+                const exit = document.exitFullscreen || document.webkitExitFullscreen;
+                if (exit) await exit.call(document);
+            }
+        } finally { reset(); }
+    };
+    for (const event of ['fullscreenchange', 'webkitfullscreenchange']) {
+        document.addEventListener(event, () => {
+            if (!fullscreenElement()) reset();
+        });
+    }
+    document.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape' && active) void close();
+    });
+    const install = () => {
+        if (active && (!active.isConnected || !active.getClientRects().length)) void close();
+        for (const id of ['capture_browser_camera', 'inference_browser_camera', 'zone_browser_camera']) {
+            const camera = document.getElementById(id);
+            if (!camera || !camera.querySelector('video')) continue;
+            const target = id === 'capture_browser_camera' ? camera
+                : document.getElementById(id.replace('_camera', '_stage'));
+            if (!target || target.querySelector('.webcam-fullscreen-button')) continue;
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'webcam-fullscreen-button';
+            button.textContent = '전체화면';
+            button.setAttribute('aria-label', '웹캠 전체화면 전환');
+            button.setAttribute('aria-pressed', 'false');
+            button.addEventListener('click', async (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                if (active === target) { await close(); return; }
+                if (active) await close();
+                active = target;
+                target.classList.add('webcam-expanded');
+                button.textContent = '전체화면 종료';
+                button.setAttribute('aria-pressed', 'true');
+                try {
+                    const request = target.requestFullscreen || target.webkitRequestFullscreen;
+                    if (request) await request.call(target);
+                } catch (_) {
+                    // Unsupported/embedded browsers still expand to the viewport.
+                }
+            });
+            target.appendChild(button);
+        }
+    };
+    new MutationObserver(install).observe(document.body, { childList: true, subtree: true });
+    install();
 }"""
 
 
@@ -752,15 +885,33 @@ _CSS = (
     "width: 100% !important; height: 100% !important; "
     "max-width: 100vw !important; max-height: 100vh !important; "
     "object-fit: contain !important; }"
+    ".webcam-fullscreen-button { position: absolute; top: 8px; right: 8px; "
+    "z-index: 30; padding: 6px 10px; border: 1px solid #aaa; border-radius: 6px; "
+    "background: #18181be6; color: white; cursor: pointer; font-size: 13px; }"
+    ".webcam-fullscreen-button:focus-visible { outline: 2px solid #60a5fa; outline-offset: 2px; }"
+    ".webcam-expanded { position: fixed !important; inset: 0 !important; "
+    "width: 100vw !important; height: 100dvh !important; max-width: none !important; "
+    "max-height: none !important; margin: 0 !important; padding: 0 !important; "
+    "z-index: 10000 !important; background: #000 !important; }"
+    ".webcam-expanded .gr-group, .webcam-expanded .styler { "
+    "height: 100% !important; min-height: 0 !important; }"
+    ".webcam-expanded #inference_browser_camera, .webcam-expanded #zone_browser_camera { position: absolute !important; inset: 0; "
+    "width: 100% !important; height: 100% !important; padding: 0 !important; border: 0 !important; }"
+    ".webcam-expanded .wrap:has(> video) { position: absolute !important; inset: 0 !important; "
+    "width: 100% !important; height: 100% !important; }"
+    ".webcam-expanded video { width: 100% !important; height: 100% !important; "
+    "max-height: none !important; object-fit: contain !important; }"
     # 브라우저 웹캠은 추론 시작 시 자동 스트리밍하므로 Gradio의 수동 '녹음' UI를 숨긴다.
-    "#inference_browser_camera .button-wrap { display: none !important; }"
+    "#capture_browser_camera .button-wrap, "
+    "#inference_browser_camera .button-wrap, #zone_browser_camera .button-wrap { display: none !important; }"
     # 원본 브라우저 영상을 계속 재생하고 추론 결과 SVG만 그 위에 겹친다.
-    "#inference_browser_stage { position: relative; isolation: isolate; }"
-    "#inference_browser_overlay { position: absolute !important; inset: 0; z-index: 5; "
+    "#inference_browser_stage, #zone_browser_stage { position: relative; isolation: isolate; }"
+    "#inference_browser_overlay, #zone_browser_overlay { position: absolute !important; inset: 0; z-index: 5; "
     "pointer-events: none; padding: 0 !important; border: 0 !important; "
     "background: transparent !important; }"
     "#inference_browser_overlay .html-container, #inference_browser_overlay .prose, "
-    "#inference_browser_overlay svg { "
+    "#inference_browser_overlay svg, #zone_browser_overlay .html-container, "
+    "#zone_browser_overlay .prose, #zone_browser_overlay svg { "
     "display: block; width: 100%; height: 100%; margin: 0; padding: 0; }"
     # 미리보기 갤러리: 항상 4열 격자로 고정. Gradio는 이미지 수에 맞춰 --grid-cols를
     # 줄여(1장이면 1열) 이미지가 칸 전체로 커지므로, grid-template-columns를 4열로 강제.
@@ -836,13 +987,14 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
                 webcam_refresh = gr.Button("서버 + 접속 기기 카메라 검색", scale=1)
             webcam_browser_payload = gr.Textbox(visible=False)
             webcam_browser_input = gr.Image(
-                label="접속 기기 카메라 입력 — 스트리밍 시작 후 아래의 캡처 시작을 누르세요",
+                label="접속 기기 카메라 — 캡처 시작을 누르면 자동으로 전송됩니다",
                 sources=["webcam"],
                 type="numpy",
                 streaming=True,
                 interactive=True,
                 visible=False,
                 height=360,
+                elem_id="capture_browser_camera",
                 elem_classes=["live-preview"],
                 webcam_options=gr.WebcamOptions(mirror=False),
             )
@@ -938,17 +1090,19 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
                 outputs=[folder_files, cap_status],
             )
 
+            cap_sources_before = gr.State([])
             cap_prepare_event = cap_start_btn.click(
                 fn=prepare_capture_preview,
-                outputs=[cap_preview, cap_status],
+                outputs=[cap_preview, cap_status, cap_sources_before],
             )
             capture_event = cap_prepare_event.then(
                 fn=run_capture,
+                js=_AUTO_START_CAPTURE_CAMERA_JS,
                 inputs=[browser_session_id, source_type, youtube_url, capture_fps, folder_files, webcam_index, video_file],
                 outputs=[cap_preview, cap_status],
                 show_progress="hidden",
                 concurrency_limit=1,
-                concurrency_id="frame_capture",
+                concurrency_id="dataset_write",
             )
             cap_stop_btn.click(
                 fn=stop_capture_and_reset,
@@ -967,7 +1121,7 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
             gr.Markdown("### SAM3 텍스트 프롬프트로 자동 라벨링")
             gr.Markdown(
                 "프롬프트와 conf를 입력하고 **① 미리보기**로 샘플 라벨을 확인하세요. "
-                "결과가 괜찮으면 **② 전체 라벨링 시작**으로 모든 프레임에 적용합니다."
+                "결과가 괜찮으면 **② 라벨링 시작**을 누르세요. 기본으로 미처리 이미지만 처리합니다."
             )
 
             prompts_input = gr.Textbox(
@@ -982,6 +1136,7 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
                 label="라벨링할 소스",
                 info="선택한 URL·웹캠 세션만 처리하며 다른 소스의 기존 라벨은 보존합니다.",
             )
+            label_mode = gr.Radio(["미처리만", "선택 소스 재라벨링"], value="미처리만", label="라벨링 방식")
             with gr.Row():
                 conf_slider = gr.Slider(
                     minimum=0.05, maximum=0.9, value=0.25, step=0.05,
@@ -995,7 +1150,7 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
 
             with gr.Row():
                 label_preview_btn = gr.Button("① 미리보기", variant="secondary")
-                label_start_btn   = gr.Button("② 전체 라벨링 시작", variant="primary")
+                label_start_btn   = gr.Button("② 라벨링 시작", variant="primary")
                 label_stop_btn    = gr.Button("중지", variant="stop")
 
             label_gallery = gr.Gallery(
@@ -1014,6 +1169,7 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
 
             preview_event = label_preview_btn.click(
                 fn=run_label_preview,
+                concurrency_id="dataset_write", concurrency_limit=1,
                 inputs=[
                     prompts_input,
                     conf_slider,
@@ -1024,8 +1180,9 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
             )
             label_event = label_start_btn.click(
                 fn=run_label,
-                inputs=[prompts_input, conf_slider, label_source_select],
+                inputs=[prompts_input, conf_slider, label_source_select, label_mode],
                 outputs=[label_preview, label_status],
+                concurrency_id="dataset_write", concurrency_limit=1,
             )
             label_stop_btn.click(
                 fn=labeler.stop,
@@ -1076,12 +1233,16 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
 
                 def _sync(*names):
                     # ID 순서대로 이름을 모아 최종 클래스 이름 문자열 생성
-                    return ", ".join((n or "").strip() for n in names)
+                    try:
+                        return dataset.save_class_names(names)
+                    except ValueError as exc:
+                        raise gr.Error(str(exc)) from exc
 
                 # 어느 칸을 수정해도 즉시 집계 State(ds_prompts)에 반영
                 # (ds_class_state 미변경 → 리렌더/포커스 유실 없음)
                 for nb in name_boxes:
-                    nb.change(_sync, inputs=name_boxes, outputs=ds_prompts)
+                    nb.input(_sync, inputs=name_boxes, outputs=ds_prompts,
+                             concurrency_id="dataset_write", concurrency_limit=1)
 
             # 클래스 이름 칸들에서 집계한 최종 클래스 이름(ID 0,1,2… 순서, 쉼표 결합).
             # 화면에는 표시하지 않고 미리보기/구성 등 다운스트림의 입력 소스로만 사용.
@@ -1089,8 +1250,12 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
 
             with gr.Row():
                 filter_empty_chk = gr.Checkbox(
-                    label="라벨 없는 프레임 숨기기 / 제외",
-                    value=False,
+                    label="빈 라벨 프레임 숨기기 / 학습에서 제외",
+                    value=True,
+                    info=(
+                        "객체 라벨이 없는 이미지를 미리보기와 데이터셋 구성에서 제외합니다. "
+                        "원본은 보존하며, 체크를 끄면 처리 완료된 빈 라벨 이미지를 배경으로 포함합니다."
+                    ),
                 )
                 val_ratio_slider = gr.Slider(
                     minimum=0.1, maximum=0.4, value=0.2, step=0.05,
@@ -1104,7 +1269,7 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
                 label="Validation으로 사용할 소스",
                 info=(
                     "선택한 소스 전체를 validation으로 배정합니다. "
-                    "비워두면 목표 비율에 맞춰 소스 단위로 자동 선택합니다."
+                    "비워두면 기존 배정을 유지하고 새 소스만 목표 비율에 맞춰 추가합니다."
                 ),
             )
             validation_source_refresh = gr.Button(
@@ -1151,6 +1316,7 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
             )
             delete_btn.click(
                 fn=dataset.delete_frame,
+                concurrency_id="dataset_write", concurrency_limit=1,
                 inputs=[selected_stem_state, ds_prompts, filter_empty_chk],
                 outputs=[ds_gallery, ds_stats, ds_detail, selected_stem_state, delete_status],
             )
@@ -1161,6 +1327,7 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
 
             build_btn.click(
                 fn=dataset.build_dataset,
+                concurrency_id="dataset_write", concurrency_limit=1,
                 inputs=[
                     ds_prompts,
                     val_ratio_slider,
@@ -1327,7 +1494,7 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
                     choices=_base_models,
                     value="",
                     label="베이스 모델 (이어학습)",
-                    info="비우면 사전학습 yolo26n.pt로 처음부터 학습. 학습된 모델을 고르면 "
+                    info="비우면 사전학습 yolo26m.pt로 처음부터 학습. 학습된 모델을 고르면 "
                          "그 가중치 위에 이어서 파인튜닝합니다 (괄호 안은 생성 날짜).",
                     scale=4,
                 )
@@ -1357,11 +1524,12 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
                 )
 
             with gr.Row():
-                batch_slider = gr.Slider(
-                    minimum=1, maximum=64, value=16, step=1,
+                batch_slider = gr.Dropdown(
+                    choices=[("자동 (-1)", -1)] + [(str(n), n) for n in range(1, 65)],
+                    value=-1,
                     label="Batch Size",
-                    info="한 번에 처리할 이미지 수. GPU VRAM 8GB 이하면 8로 낮추세요. "
-                         "CUDA OOM 오류 발생 시 가장 먼저 줄일 값",
+                    info="-1은 CUDA GPU 메모리에 맞춰 자동 설정합니다. "
+                         "CPU·MPS에서는 기본 배치 크기 16을 사용합니다. 수동 설정은 1~64입니다.",
                 )
                 patience_slider = gr.Slider(
                     minimum=1, maximum=100, value=10, step=1,
@@ -1470,10 +1638,10 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
                     minimum=0.05, maximum=0.95, value=0.5, step=0.05,
                     label="신뢰도 임계값 (conf)",
                 )
-                inf_skip = gr.Slider(
-                    minimum=1, maximum=10, value=3, step=1,
-                    label="추론 간격 (N프레임마다 1회)",
-                    info="1=매 프레임 추론(느림), 3=3프레임마다 추론(권장), 10=빠르지만 부정확",
+                inf_interval = gr.Slider(
+                    minimum=0.1, maximum=5.0, value=1.0, step=0.1,
+                    label="탐지 주기 (초)",
+                    info="기본 1초마다 탐지하며, 그 사이에는 마지막 결과를 표시합니다.",
                 )
 
             with gr.Row():
@@ -1605,6 +1773,7 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
                 outputs=None,
                 queue=False,
                 show_progress="hidden",
+                # 전송과 탐지 주기를 분리: 백엔드가 탐지를 기본 1초로 제한한다.
                 stream_every=0.1,
             )
             inf_source_type.change(
@@ -1648,7 +1817,7 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
 
             inf_event = inf_start_btn.click(
                 fn=run_inference,
-                inputs=[browser_session_id, inf_model_path, inf_source_type, inf_youtube_url, inf_conf, inf_skip, inf_folder_files, inf_webcam_index, inf_video_file],
+                inputs=[browser_session_id, inf_model_path, inf_source_type, inf_youtube_url, inf_conf, inf_interval, inf_folder_files, inf_webcam_index, inf_video_file],
                 outputs=[inf_preview, inf_status, inf_browser_overlay],
                 js=_AUTO_START_INFERENCE_CAMERA_JS,
             )
@@ -1671,7 +1840,7 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
 
         # ── 침입 감지 ────────────────────────────────────────
         with gr.Tab("침입 감지") as panel_zone:
-            gr.Markdown("### Safety Cone 자동 추적 침입 감지")
+            gr.Markdown("### 학습 클래스 자동 추적 침입 감지")
             zm_session_id = gr.State(
                 value=zone_monitor.create_session,
                 time_to_live=3600,
@@ -1690,11 +1859,27 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
                 )
                 zm_model_refresh = gr.Button("모델 목록 새로고침", scale=1)
 
+            zm_anchor_class = gr.Dropdown(
+                choices=[], value=None,
+                label="자동 영역 추적 클래스",
+                info="선택한 모델의 학습 클래스 중 영역 경계를 구성할 객체를 고르세요. 변경 후 스트림을 다시 시작하세요.",
+            )
+            zm_class_status = gr.Markdown()
+            zm_model_path.change(
+                fn=refresh_zone_classes,
+                inputs=zm_model_path,
+                outputs=[zm_anchor_class, zm_class_status],
+            )
+
             zm_conf = gr.Slider(
                 minimum=0.05, maximum=0.95, value=0.5, step=0.05,
                 label="신뢰도 임계값 (conf)",
             )
-            zm_skip = gr.State(1)
+            zm_interval = gr.Slider(
+                minimum=0.1, maximum=5.0, value=1.0, step=0.1,
+                label="탐지 주기 (초)",
+                info="기본 1초마다 탐지·추적하며, 그 사이에는 마지막 결과를 표시합니다.",
+            )
 
             with gr.Row():
                 zm_source_type = gr.Radio(
@@ -1725,17 +1910,26 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
                 )
                 zm_webcam_refresh = gr.Button("서버 + 접속 기기 카메라 검색", scale=1)
             zm_webcam_browser_payload = gr.Textbox(visible=False)
-            zm_webcam_browser_input = gr.Image(
-                label="접속 기기 카메라 입력 — 스트리밍 시작 후 아래의 스트림 시작을 누르세요",
-                sources=["webcam"],
-                type="numpy",
-                streaming=True,
-                interactive=True,
-                visible=False,
-                height=360,
-                elem_classes=["live-preview"],
-                webcam_options=gr.WebcamOptions(mirror=False),
-            )
+            with gr.Group(
+                elem_id="zone_browser_stage",
+                elem_classes=["src-hidden"],
+            ):
+                zm_webcam_browser_input = gr.Image(
+                    sources=["webcam"],
+                    type="numpy",
+                    streaming=True,
+                    interactive=True,
+                    visible=False,
+                    show_label=False,
+                    height=360,
+                    elem_id="zone_browser_camera",
+                    elem_classes=["live-preview"],
+                    webcam_options=gr.WebcamOptions(mirror=False),
+                )
+                zm_browser_overlay = gr.HTML(
+                    value="",
+                    elem_id="zone_browser_overlay",
+                )
             with gr.Row(elem_id="tab6_video_row", elem_classes=["src-hidden"]):
                 zm_video_file = gr.File(
                     label="비디오 파일 업로드 (비우면 Tab 1 업로드 자동 사용)",
@@ -1762,11 +1956,7 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
                     elem_classes=["sample-card"],
                 )
 
-            zm_source_type.change(
-                fn=None,
-                inputs=zm_source_type,
-                outputs=None,
-                js="""(s) => {
+            zone_source_toggle_js = """(s, webcamValue) => {
                     const yt = document.getElementById('tab6_youtube_url');
                     const ys = document.getElementById('tab6_youtube_sample_row');
                     const wc = document.getElementById('tab6_webcam_row');
@@ -1774,6 +1964,8 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
                     const vs = document.getElementById('tab6_video_sample_row');
                     const fr = document.getElementById('tab6_folder_row');
                     const fs = document.getElementById('tab6_folder_sample_row');
+                    const browserWebcam = s === '웹캠'
+                        && String(webcamValue || '').startsWith('browser:');
                     if (yt) yt.classList.toggle('src-hidden', s !== 'YouTube URL');
                     if (ys) ys.classList.toggle('src-hidden', s !== 'YouTube URL');
                     if (wc) wc.classList.toggle('src-hidden', s !== '웹캠');
@@ -1781,7 +1973,24 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
                     if (vs) vs.classList.toggle('src-hidden', s !== '비디오 파일');
                     if (fr) fr.classList.toggle('src-hidden', s !== '이미지 폴더');
                     if (fs) fs.classList.toggle('src-hidden', s !== '이미지 폴더');
-                }""",
+                    document.querySelectorAll('#zone_browser_stage').forEach(
+                        (element) => element.classList.toggle('src-hidden', !browserWebcam)
+                    );
+                    document.querySelectorAll('#zone_result_image').forEach(
+                        (element) => element.classList.toggle('src-hidden', browserWebcam)
+                    );
+                }"""
+            zm_source_type.change(
+                fn=None,
+                inputs=[zm_source_type, zm_webcam_index],
+                outputs=None,
+                js=zone_source_toggle_js,
+            )
+            zm_webcam_index.change(
+                fn=None,
+                inputs=[zm_source_type, zm_webcam_index],
+                outputs=None,
+                js=zone_source_toggle_js,
             )
             zm_webcam_index.change(
                 fn=configure_browser_camera,
@@ -1801,6 +2010,7 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
                 outputs=None,
                 queue=False,
                 show_progress="hidden",
+                # 전송과 탐지 주기를 분리: 백엔드가 탐지를 기본 1초로 제한한다.
                 stream_every=0.1,
             )
             zm_source_type.change(
@@ -1821,15 +2031,16 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
                 zm_stop_btn  = gr.Button("중지 / 초기화", variant="stop")
 
             zm_preview = gr.Image(
-                label="Safety Cone 자동 추적 실시간 영상",
+                label="침입 감지 결과",
+                elem_id="zone_result_image",
                 type="numpy",
                 streaming=True,
                 elem_classes=["live-preview"],
             )
             zm_stream_status = gr.Textbox(label="상태", interactive=False)
             gr.Markdown(
-                "`스트림 시작`을 누르면 `Safety Cone`을 매 프레임 추적합니다. "
-                "라바콘 Track이 3개 이상 잡히면 바닥 중심점의 외곽선을 연결해 "
+                "`스트림 시작`을 누르면 선택한 학습 클래스를 설정한 주기(기본 1초)로 추적합니다. "
+                "선택한 클래스의 Track이 3개 이상 잡히면 바닥 중심점의 외곽선을 연결해 "
                 "침입 감지 영역을 자동 생성하고 계속 갱신합니다."
             )
             gr.Markdown(
@@ -1837,9 +2048,9 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
                 "- **초록색 영역**: 영역 안에 침입 객체가 없습니다.\n"
                 "- **빨간색 영역·반투명 채우기**: 영역 안에 침입 객체가 있습니다. "
                 "영역 이름의 `(N)`은 침입 객체 수입니다.\n"
-                "- **주황색 영역·앵커**: 추적하던 Safety Cone의 Track ID가 현재 프레임에서 "
+                "- **주황색 영역·앵커**: 추적하던 객체의 Track ID가 현재 프레임에서 "
                 "하나 이상 유실되어 마지막 위치를 유지 중입니다.\n"
-                "- **하늘색 점·선**: 정상 추적 중인 Safety Cone 앵커와 자동 감시 경계입니다."
+                "- **하늘색 점·선**: 정상 추적 중인 객체 앵커와 자동 감시 경계입니다."
             )
 
             gr.Markdown("#### 수동 다각형 영역 추가")
@@ -1885,31 +2096,34 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
             )
 
             zm_prepare_event = zm_start_btn.click(
-                fn=zone_monitor.prepare_stream,
+                fn=prepare_zone_stream,
                 inputs=zm_session_id,
                 outputs=[
                     zm_preview,
                     zm_zone_editor,
                     zm_stream_status,
                     zm_zone_status,
+                    zm_browser_overlay,
                 ],
                 show_progress="hidden",
+                js=_AUTO_START_ZONE_CAMERA_JS,
             )
             zm_stream_event = zm_prepare_event.then(
                 fn=run_zone_stream,
-                inputs=[browser_session_id, zm_session_id, zm_source_type, zm_youtube_url, zm_model_path, zm_conf, zm_skip, zm_folder_files, zm_webcam_index, zm_video_file],
-                outputs=[zm_preview, zm_stream_status],
+                inputs=[browser_session_id, zm_session_id, zm_source_type, zm_youtube_url, zm_model_path, zm_conf, zm_interval, zm_folder_files, zm_webcam_index, zm_video_file, zm_anchor_class],
+                outputs=[zm_preview, zm_stream_status, zm_browser_overlay],
                 concurrency_id="zone_stream",
                 concurrency_limit=1,
             )
             zm_stop_btn.click(
-                fn=zone_monitor.reset,
+                fn=reset_zone_stream,
                 inputs=zm_session_id,
                 outputs=[
                     zm_preview,
                     zm_zone_editor,
                     zm_stream_status,
                     zm_zone_status,
+                    zm_browser_overlay,
                 ],
                 cancels=[zm_stream_event],
             )
@@ -2036,12 +2250,16 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
         outputs=dataset_ui_outputs,
     )
 
+    def refresh_after_capture(previous_sources):
+        choices = labeler.source_choices()
+        added = [value for _, value in choices if value not in set(previous_sources or [])]
+        return gr.update(choices=choices, value=added)
+
+    capture_event.then(refresh_after_capture, inputs=cap_sources_before, outputs=label_source_select)
+
     # 데이터셋 단계 진입 시 클래스 목록 로드 (네이티브 탭 select 이벤트).
-    # Tab 2 프롬프트가 직전 로드와 다르거나(재라벨링) 아직 로드된 적 없으면 새로
-    # 로드하고, 그 외 단순 탭 전환에는 그대로 두어 사용자가 편집한 이름을 보존한다.
+    # 영구 클래스 목록을 다시 읽어 다른 수집에서 추가된 클래스도 반영한다.
     def _maybe_load_classes(label_prompts, last_label, class_state):
-        if class_state and (label_prompts or "") == (last_label or ""):
-            return gr.update(), gr.update(), gr.update()
         return load_classes(label_prompts)
 
     panel_dataset.select(
@@ -2072,6 +2290,12 @@ with gr.Blocks(title="YOLO 파이프라인") as demo:
         outputs=train_ui_outputs,
         show_progress="hidden",
     )
+    demo.load(
+        refresh_zone_classes,
+        inputs=zm_model_path,
+        outputs=[zm_anchor_class, zm_class_status],
+    )
+    demo.load(fn=None, js=_WEBCAM_FULLSCREEN_JS)
     demo.load(
         training_panel_update,
         outputs=train_ui_outputs,
