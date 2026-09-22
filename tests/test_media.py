@@ -20,7 +20,54 @@ class _FakeCapture:
         self.released = True
 
 
+class VideoPacingTests(unittest.TestCase):
+    def test_video_reads_follow_fps_and_can_stop_during_wait(self):
+        clock = [0.0]
+        reads = []
+        class Capture:
+            def get(self, _property):
+                return 2.0
+            def read(self):
+                reads.append(clock[0])
+                return True, "frame"
+        class StopEvent:
+            def is_set(self):
+                return False
+            def wait(self, delay):
+                clock[0] += delay
+                return len(reads) == 3
+        with mock.patch.object(media.time, "perf_counter", side_effect=lambda: clock[0]):
+            frames = list(media.video_frames(Capture(), StopEvent(), pace_reads=True))
+        self.assertEqual(reads, [0.0, 0.5, 1.0])
+        self.assertEqual(len(frames), 3)
+
+
 class MediaTests(unittest.TestCase):
+    def test_youtube_resolver_prefers_video_only_http_mp4(self):
+        captured_options = {}
+
+        class _FakeYoutubeDL:
+            def __init__(self, options):
+                captured_options.update(options)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            def extract_info(self, url, download):
+                self.url = url
+                self.download = download
+                return {"url": "https://example.com/video.mp4"}
+
+        resolver = media.YouTubeStreamResolver()
+        with mock.patch.object(media.yt_dlp, "YoutubeDL", _FakeYoutubeDL):
+            stream_url = resolver.resolve("https://youtu.be/example")
+
+        self.assertEqual(stream_url, "https://example.com/video.mp4")
+        self.assertTrue(captured_options["format"].startswith("bestvideo[ext=mp4]"))
+
     def test_uploaded_video_path_validates_extension(self):
         with tempfile.TemporaryDirectory() as directory:
             invalid = Path(directory) / "video.txt"

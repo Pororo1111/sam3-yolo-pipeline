@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import html
 import threading
 import time
 import uuid
@@ -12,7 +13,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from pipeline import media, models, vision
+from pipeline import media, models, vision, webcams
 
 
 MODE_MANUAL = "manual"
@@ -20,6 +21,9 @@ MODE_TRACKED = "tracked"
 TRACKER_CONFIG = "bytetrack.yaml"
 _TRACK_CONFIDENCE = 0.1
 _DISPLAY_INTERVAL = 1.0 / 15
+_DETECTION_BOX_THICKNESS = 4
+_DETECTION_FONT_SCALE = 0.9
+_DETECTION_TEXT_THICKNESS = 3
 
 
 @dataclass(frozen=True)
@@ -32,7 +36,7 @@ class TrackObservation:
 
     @property
     def anchor(self) -> tuple[float, float]:
-        """라바콘이 지면에 닿는 bbox 바닥 중앙 정규화 좌표."""
+        """추적 객체가 지면에 닿는 bbox 바닥 중앙 정규화 좌표."""
 
         x1, _, x2, y2 = self.xyxy
         return ((x1 + x2) / 2.0, y2)
@@ -55,6 +59,7 @@ class ZoneRuntime:
     last_tracks: list[TrackObservation] = field(default_factory=list)
     edit_frame: np.ndarray | None = None
     edit_tracks: list[TrackObservation] = field(default_factory=list)
+    anchor_class_id: int | None = None
 
 
 _sessions: dict[str, ZoneRuntime] = {}
@@ -135,7 +140,19 @@ def _observations_from_boxes(boxes, names: dict, frame_shape) -> list[TrackObser
             )
         except (TypeError, ValueError, IndexError):
             continue
-    return observations
+    worker_indexes = vision.worker_person_indexes(
+        (item.class_name, item.xyxy) for item in observations
+    )
+    return [
+        TrackObservation(
+            track_id=item.track_id,
+            class_id=item.class_id,
+            confidence=item.confidence,
+            class_name="worker" if index in worker_indexes else item.class_name,
+            xyxy=item.xyxy,
+        )
+        for index, item in enumerate(observations)
+    ]
 
 
 def _point_pixels(point, width: int, height: int) -> tuple[int, int]:
@@ -221,7 +238,7 @@ def _update_tracked_zones_locked(
                 and int(expected_class_id) != observation.class_id
             ):
                 # ByteTrack을 재시작하거나 장면이 급변하면 ID가 다른 클래스에
-                # 재할당될 수 있다. 라바콘 앵커가 사람 등을 따라가지 않게 한다.
+                # 재할당될 수 있다. 추적 객체 앵커가 사람 등을 따라가지 않게 한다.
                 anchor["missing"] = int(anchor.get("missing", 0)) + 1
                 continue
             anchor["point"] = list(observation.anchor)
@@ -254,7 +271,7 @@ def _render_zone_list(
     height, width = annotated.shape[:2]
     all_intruders: set[tuple[str, int]] = set()
     total_missing = 0
-    # 영역 경계용 라바콘은 겹치는 다른 영역에서도 침입 객체로 세지 않는다.
+    # 영역 경계용 추적 객체는 겹치는 다른 영역에서도 침입 객체로 세지 않는다.
     all_anchor_ids = {
         int(anchor.get("track_id", -1))
         for zone in zones
@@ -337,25 +354,98 @@ def _render_zones(
     return _render_zone_list(annotated, zones, observations)
 
 
+def _browser_overlay_svg(runtime, frame, observations):
+    """브라우저 원본 영상 위에 박스와 감시 영역만 SVG로 겹친다."""
+    height, width = frame.shape[:2]
+    with runtime.lock:
+        zones = copy.deepcopy(runtime.zones)
+    anchor_ids = {
+        int(anchor["track_id"])
+        for zone in zones if zone.get("mode") == MODE_TRACKED
+        for anchor in zone.get("anchors", [])
+    }
+    elements = []
+    all_intruders = set()
+    total_missing = 0
+    stroke = max(4.0, width / 160.0)
+    font = max(28.0, width / 22.0)
+
+    def text(x, y, label, color):
+        return (
+            f'<text x="{x:.1f}" y="{max(font, y):.1f}" fill="{color}" '
+            f'font-family="sans-serif" font-size="{font:.1f}" font-weight="700" '
+            f'stroke="#000" stroke-width="{max(2.0, font / 8):.1f}" '
+            f'paint-order="stroke">{html.escape(str(label), quote=True)}</text>'
+        )
+
+    for item in observations:
+        x1, y1 = _point_pixels(item.xyxy[:2], width, height)
+        x2, y2 = _point_pixels(item.xyxy[2:], width, height)
+        blue, green, red = _zone_box_color(item.class_id)
+        color = f"rgb({red},{green},{blue})"
+        elements.append(
+            f'<rect x="{x1}" y="{y1}" width="{max(0, x2-x1)}" '
+            f'height="{max(0, y2-y1)}" fill="none" stroke="{color}" stroke-width="{stroke}"/>'
+        )
+        track = f" #{item.track_id}" if item.track_id >= 0 else ""
+        elements.append(text(x1, y1 - stroke * 2, f"{item.class_name}{track} {item.confidence:.2f}", color))
+
+    for zone in zones:
+        points = _zone_points(zone)
+        if len(points) < 3:
+            continue
+        polygon = _polygon_pixels(points, width, height)
+        anchors = zone.get("anchors", []) if zone.get("mode") == MODE_TRACKED else []
+        missing = sum(int(anchor.get("missing", 0)) > 0 for anchor in anchors)
+        total_missing += missing
+        intruders = _objects_in_zone(observations, polygon, anchor_ids, width, height)
+        all_intruders.update(intruders)
+        color = "#dc0000" if intruders else ("#ffa500" if missing else "#50dc00")
+        vertices = " ".join(f"{x},{y}" for x, y in polygon)
+        elements.append(
+            f'<polygon points="{vertices}" stroke="{color}" stroke-width="{stroke}" '
+            f'fill="{color if intruders else "none"}" fill-opacity="0.25"/>'
+        )
+        for anchor, (x, y) in zip(anchors, polygon):
+            anchor_color = "#ffa500" if anchor.get("missing", 0) else "#00dcff"
+            elements.append(f'<circle cx="{x}" cy="{y}" r="{stroke * 2}" fill="{anchor_color}"/>')
+            elements.append(text(x + stroke, y - stroke, f"#{anchor['track_id']}", anchor_color))
+        label = f"{zone.get('label', 'zone')} ({len(intruders)})"
+        if missing:
+            label += f" lost:{missing}"
+        elements.append(text(*polygon[0], label, color))
+    svg = (
+        f'<svg viewBox="0 0 {width} {height}" preserveAspectRatio="xMidYMid meet" '
+        f'aria-hidden="true">{"".join(elements)}</svg>'
+    )
+    return svg, len(all_intruders), len(zones), total_missing
+
+
 def _draw_track_observations(
     frame: np.ndarray,
     observations: list[TrackObservation],
 ) -> np.ndarray:
     height, width = frame.shape[:2]
+    scale = vision.annotation_scale(frame)
+    box_thickness = max(1, round(_DETECTION_BOX_THICKNESS * scale))
+    font_scale = _DETECTION_FONT_SCALE * scale
+    text_thickness = max(1, round(_DETECTION_TEXT_THICKNESS * scale))
+    label_offset = max(8, round(8 * scale))
+    minimum_baseline = max(24, round(24 * scale))
     for observation in observations:
         x1, y1 = _point_pixels(observation.xyxy[:2], width, height)
         x2, y2 = _point_pixels(observation.xyxy[2:], width, height)
         color = _zone_box_color(observation.class_id)
-        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color, box_thickness)
         track = f" #{observation.track_id}" if observation.track_id >= 0 else ""
         cv2.putText(
             frame,
             f"{observation.class_name}{track} {observation.confidence:.2f}",
-            (x1, max(y1 - 6, 0)),
+            (x1, max(y1 - label_offset, minimum_baseline)),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.55,
+            font_scale,
             color,
-            2,
+            text_thickness,
         )
     return frame
 
@@ -408,20 +498,19 @@ def _render_editor_locked(runtime: ZoneRuntime) -> np.ndarray | None:
 
 def _auto_anchor_candidates(
     observations: list[TrackObservation],
+    class_id: int | None = None,
 ) -> tuple[list[dict], str | None]:
-    """같은 클래스 Track 중 라바콘 후보를 골라 볼록 다각형 순서로 반환한다."""
+    """선택한 학습 클래스의 Track을 볼록 다각형 순서로 반환한다."""
 
     grouped: dict[int, list[TrackObservation]] = {}
     for observation in observations:
-        if observation.track_id >= 0:
+        if observation.track_id >= 0 and (class_id is None or observation.class_id == class_id):
             grouped.setdefault(observation.class_id, []).append(observation)
 
     eligible = [
         items
         for items in grouped.values()
         if len(items) >= 3
-        and "safety cone"
-        in items[0].class_name.casefold().replace("_", " ").replace("-", " ")
     ]
     if not eligible:
         return [], None
@@ -451,13 +540,13 @@ def _auto_anchor_candidates(
     return anchors, selected[0].class_name
 
 
-def _ensure_auto_cone_zone_locked(
+def _ensure_auto_tracked_zone_locked(
     runtime: ZoneRuntime,
     observations: list[TrackObservation],
 ) -> None:
-    """Safety Cone Track 3개 이상을 실시간 자동 추적 영역으로 유지한다."""
+    """선택한 클래스의 Track 3개 이상을 자동 추적 영역으로 유지한다."""
 
-    anchors, _ = _auto_anchor_candidates(observations)
+    anchors, class_name = _auto_anchor_candidates(observations, runtime.anchor_class_id)
     if len(anchors) < 3:
         return
 
@@ -469,17 +558,18 @@ def _ensure_auto_cone_zone_locked(
         runtime.zones.append(
             {
                 "id": uuid.uuid4().hex,
-                "label": "Safety Cone zone",
+                "label": f"{class_name} zone",
                 "mode": MODE_TRACKED,
                 "anchors": anchors,
             }
         )
     else:
         tracked_zone["anchors"] = anchors
+        tracked_zone["label"] = f"{class_name} zone"
 
 
 def auto_select_tracked_anchors(session_id: str, mode: str):
-    """추적 모드 진입 시 현재 편집 프레임의 라바콘 경계를 자동 선택한다."""
+    """추적 모드 진입 시 현재 편집 프레임의 추적 객체 경계를 자동 선택한다."""
 
     runtime = _runtime(session_id)
     with runtime.lock:
@@ -491,7 +581,7 @@ def auto_select_tracked_anchors(session_id: str, mode: str):
 
         runtime.draft_points.clear()
         runtime.draft_anchors, class_name = _auto_anchor_candidates(
-            runtime.edit_tracks
+            runtime.edit_tracks, runtime.anchor_class_id
         )
         count = len(runtime.draft_anchors)
         image = _render_editor_locked(runtime)
@@ -499,10 +589,10 @@ def auto_select_tracked_anchors(session_id: str, mode: str):
             runtime.draft_anchors.clear()
             return image, (
                 "동일 클래스의 Track ID 객체가 3개 이상 필요합니다. "
-                "라바콘이 모두 검출된 프레임에서 다시 시도하세요."
+                "추적 객체가 모두 검출된 프레임에서 다시 시도하세요."
             )
         return image, (
-            f"{class_name} 라바콘 Track {count}개를 자동 선택했습니다. "
+            f"{class_name} Track {count}개를 자동 선택했습니다. "
             "경계를 확인한 뒤 다각형 완료를 누르세요."
         )
 
@@ -521,12 +611,12 @@ def capture_editor_frame(session_id: str, mode: str = MODE_MANUAL):
         track_count = sum(1 for item in runtime.edit_tracks if item.track_id >= 0)
         if mode == MODE_TRACKED:
             runtime.draft_anchors, class_name = _auto_anchor_candidates(
-                runtime.edit_tracks
+                runtime.edit_tracks, runtime.anchor_class_id
             )
             image = _render_editor_locked(runtime)
             if len(runtime.draft_anchors) >= 3:
                 return image, (
-                    f"{class_name} 라바콘 Track {len(runtime.draft_anchors)}개를 "
+                    f"{class_name} Track {len(runtime.draft_anchors)}개를 "
                     "자동 선택했습니다. 경계를 확인한 뒤 다각형 완료를 누르세요."
                 )
         image = _render_editor_locked(runtime)
@@ -612,7 +702,7 @@ def select_editor_point(session_id: str, mode: str, event_index):
                 }
             )
             status = (
-                f"라바콘/앵커 {len(runtime.draft_anchors)}개 선택 · "
+                f"추적 객체 {len(runtime.draft_anchors)}개 선택 · "
                 f"{observation.class_name} Track #{observation.track_id}"
             )
         else:
@@ -710,7 +800,7 @@ def reset(session_id: str):
     return (
         None,
         None,
-        "스트림 중지 / 자동 라바콘 영역 초기화",
+        "스트림 중지 / 자동 추적 영역 초기화",
         "수동 영역 편집을 초기화했습니다.",
     )
 
@@ -732,18 +822,19 @@ def prepare_stream(session_id: str):
     return (
         None,
         None,
-        "Safety Cone 자동 추적 스트림을 준비합니다.",
+        "학습 클래스 자동 추적 스트림을 준비합니다.",
         "수동 영역 편집을 초기화했습니다.",
     )
 
 
-def _begin_stream(runtime: ZoneRuntime) -> tuple[str, threading.Event]:
+def _begin_stream(runtime: ZoneRuntime, anchor_class_id=None) -> tuple[str, threading.Event]:
     runtime.stop_event.set()
     current_event = threading.Event()
     run_id = uuid.uuid4().hex
     with runtime.lock:
         runtime.stop_event = current_event
         runtime.run_id = run_id
+        runtime.anchor_class_id = anchor_class_id
         # 새 소스/모델의 좌표와 Track ID는 이전 스트림과 호환되지 않는다.
         runtime.zones.clear()
         runtime.draft_points.clear()
@@ -764,12 +855,18 @@ def _is_current(runtime: ZoneRuntime, run_id: str, stop_event: threading.Event) 
         )
 
 
-def _track_frame(model, frame_bgr: np.ndarray, visible_conf: float):
+def _track_frame(
+    model,
+    frame_bgr: np.ndarray,
+    visible_conf: float,
+    class_ids: list[int],
+):
     results = model.track(
         frame_bgr,
         persist=True,
         tracker=TRACKER_CONFIG,
         conf=min(_TRACK_CONFIDENCE, max(0.01, float(visible_conf))),
+        classes=class_ids,
         verbose=False,
     )
     return results[0].boxes if results and results[0].boxes is not None else None
@@ -790,7 +887,7 @@ def _update_tracking_and_latest(
         ):
             return False
         _update_tracked_zones_locked(runtime, observations)
-        _ensure_auto_cone_zone_locked(runtime, observations)
+        _ensure_auto_tracked_zone_locked(runtime, observations)
         runtime.last_frame = frame_bgr.copy()
         runtime.last_tracks = list(observations)
         return True
@@ -809,18 +906,20 @@ def stream(
     youtube_url: str,
     model_path: str,
     conf: float,
-    infer_every: int,
+    detection_interval: float = 1.0,
     folder_files=None,
     webcam_index=None,
     video_file=None,
+    browser_session_id: str = "",
+    anchor_class_id=None,
 ):
     runtime = _runtime(session_id)
-    run_id, stop_event = _begin_stream(runtime)
+    run_id, stop_event = _begin_stream(runtime, anchor_class_id)
 
     if not (model_path or "").strip():
         model_path = models.latest_trained_model()
     if model_path is None or not Path(model_path).is_file():
-        yield None, f"모델 파일을 찾을 수 없습니다: {model_path}"
+        yield None, f"모델 파일을 찾을 수 없습니다: {model_path}", ""
         return
 
     try:
@@ -828,29 +927,41 @@ def stream(
 
         model = YOLO(model_path)
     except Exception as exc:
-        yield None, f"모델 로딩 실패: {exc}"
+        yield None, f"모델 로딩 실패: {exc}", ""
         return
 
     names = model.names or {}
-    interval = max(1, int(infer_every))
+    class_ids = vision.inference_class_ids(names)
+    try:
+        anchor_class_id = int(anchor_class_id)
+    except (TypeError, ValueError):
+        anchor_class_id = None
+    if anchor_class_id not in class_ids:
+        yield None, "모델의 자동 영역 추적 클래스를 선택하세요.", ""
+        return
+    with runtime.lock:
+        runtime.anchor_class_id = int(anchor_class_id)
+    interval = max(0.1, float(detection_interval))
 
     if source_type == media.SOURCE_IMAGES:
         try:
-            yield from _stream_folder(
+            for image, status in _stream_folder(
                 runtime,
                 run_id,
                 stop_event,
                 model,
                 names,
+                class_ids,
                 folder_files,
                 float(conf),
                 interval,
-            )
+            ):
+                yield image, status, ""
         except GeneratorExit:
             raise
         except Exception as exc:
             if _is_current(runtime, run_id, stop_event):
-                yield None, f"이미지 폴더 스트림 오류: {exc}"
+                yield None, f"이미지 폴더 스트림 오류: {exc}", ""
         return
 
     try:
@@ -859,29 +970,33 @@ def stream(
             youtube_url=youtube_url,
             webcam_index=webcam_index,
             video_file=video_file,
+            browser_session_id=browser_session_id,
         )
     except media.MediaSourceError as exc:
-        yield None, str(exc)
+        yield None, str(exc), ""
         return
 
-    yield None, "ByteTrack 스트림 시작..."
+    browser_webcam = isinstance(source.value, webcams.BrowserWebcamSource)
+    yield None, f"{names[int(anchor_class_id)]} 자동 영역 · ByteTrack 스트림 시작...", ""
     last_yield = 0.0
+    next_detection_at = 0.0
     frame_index = 0
     observations: list[TrackObservation] = []
 
     try:
         with media.open_video_capture(source) as capture:
-            while (
-                not stop_event.is_set()
-                and _is_current(runtime, run_id, stop_event)
-            ):
-                ok, frame_bgr = capture.read()
-                if not ok:
+            for frame_bgr in media.video_frames(capture, stop_event, source.pace_reads):
+                if not _is_current(runtime, run_id, stop_event):
                     break
-
-                effective_interval = 1
-                if frame_index % effective_interval == 0:
-                    boxes = _track_frame(model, frame_bgr, float(conf))
+                now = time.perf_counter()
+                if frame_index == 0 or now >= next_detection_at:
+                    next_detection_at = now + interval
+                    boxes = _track_frame(
+                        model,
+                        frame_bgr,
+                        float(conf),
+                        class_ids,
+                    )
                     observations = _observations_from_boxes(
                         boxes,
                         names,
@@ -906,35 +1021,45 @@ def stream(
                 visible_observations = [
                     item for item in observations if item.confidence >= float(conf)
                 ]
-                annotated = _draw_track_observations(
-                    frame_bgr.copy(),
-                    visible_observations,
-                )
-                annotated, intruders, zone_count, missing = _render_zones(
-                    runtime,
-                    annotated,
-                    visible_observations,
-                )
+                overlay = ""
+                preview = None
+                if browser_webcam:
+                    overlay, intruders, zone_count, missing = _browser_overlay_svg(
+                        runtime, frame_bgr, visible_observations,
+                    )
+                else:
+                    annotated = _draw_track_observations(
+                        frame_bgr.copy(), visible_observations,
+                    )
+                    annotated, intruders, zone_count, missing = _render_zones(
+                        runtime, annotated, visible_observations,
+                    )
+                    preview = vision.to_rgb(annotated)
                 frame_index += 1
                 status = (
                     f"프레임 {frame_index} | 영역: {zone_count}개 | "
-                    f"침입 객체: {intruders}개 | ByteTrack skip={effective_interval}"
+                    f"침입 객체: {intruders}개 | ByteTrack 탐지 주기={interval:g}초"
                 )
                 if missing:
                     status += f" | 추적 유실 anchor: {missing}개"
                 if not _is_current(runtime, run_id, stop_event):
                     break
-                yield vision.to_rgb(annotated), status
+                yield preview, status, overlay
 
     except media.MediaSourceError as exc:
-        yield None, str(exc)
+        yield None, str(exc), ""
+        return
     except GeneratorExit:
         raise
     except Exception as exc:
-        yield None, f"스트림 오류: {exc}"
+        yield None, f"스트림 오류: {exc}", ""
+        return
 
     if _is_current(runtime, run_id, stop_event):
-        yield None, "스트림 종료"
+        if frame_index == 0 and browser_webcam:
+            yield None, "접속 기기 카메라 프레임을 받지 못했습니다. 카메라 미리보기를 확인하고 다시 시작하세요.", ""
+        else:
+            yield None, "스트림 종료", ""
 
 
 def _reset_model_trackers(model) -> None:
@@ -951,9 +1076,10 @@ def _stream_folder(
     stop_event: threading.Event,
     model,
     names: dict,
+    class_ids: list[int],
     folder_files,
     conf: float,
-    infer_every: int,
+    detection_interval: float = 1.0,
 ):
     images = media.filter_image_paths(folder_files)
     if not images:
@@ -975,18 +1101,13 @@ def _stream_folder(
             frame_bgr = media.read_image(path)
             if frame_bgr is None:
                 continue
-            effective_interval = 1
-            if frame_index % effective_interval == 0:
-                boxes = _track_frame(model, frame_bgr, conf)
-                observations = _observations_from_boxes(boxes, names, frame_bgr.shape)
-                if not _update_tracking_and_latest(
-                    runtime,
-                    run_id,
-                    stop_event,
-                    frame_bgr,
-                    observations,
-                ):
-                    break
+            started_at = time.perf_counter()
+            boxes = _track_frame(model, frame_bgr, conf, class_ids)
+            observations = _observations_from_boxes(boxes, names, frame_bgr.shape)
+            if not _update_tracking_and_latest(
+                runtime, run_id, stop_event, frame_bgr, observations,
+            ):
+                break
 
             visible_observations = [
                 item for item in observations if item.confidence >= conf
@@ -1004,7 +1125,7 @@ def _stream_folder(
             frame_index += 1
             status = (
                 f"{path.name} | 영역: {zone_count}개 | 침입 객체: {intruders}개 "
-                f"| ByteTrack skip={effective_interval} ({shown})"
+                f"| ByteTrack 탐지 주기={detection_interval:g}초 ({shown})"
             )
             if missing:
                 status += f" | 추적 유실 anchor: {missing}개"
@@ -1014,7 +1135,7 @@ def _stream_folder(
             if not _is_current(runtime, run_id, stop_event):
                 break
             yield vision.to_rgb(annotated), status
-            stop_event.wait(0.4)
+            stop_event.wait(max(0.0, detection_interval - (time.perf_counter() - started_at)))
         # 폴더의 끝→처음은 실제 시간축이 아니며 ByteTrack ID가 재사용될 수 있다.
         # 고정 영역은 유지하되 추적 영역은 폐기해 다른 객체로 이동하지 않게 한다.
         _reset_model_trackers(model)
@@ -1023,7 +1144,7 @@ def _stream_folder(
         if invalidated:
             boundary_notice = (
                 f"폴더 반복 경계에서 추적 영역 {invalidated}개를 해제했습니다. "
-                "라바콘을 다시 선택하세요."
+                "추적 객체를 다시 선택하세요."
             )
         frame_index = 0
         observations = []

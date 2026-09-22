@@ -37,7 +37,7 @@ class MediaSourceError(RuntimeError):
 class VideoSource:
     """OpenCV가 열 수 있는 영상 소스와 재생 특성."""
 
-    value: str | int
+    value: str | int | webcams.BrowserWebcamSource
     source_type: str
     pace_reads: bool
 
@@ -62,7 +62,13 @@ class YouTubeStreamResolver:
                 return cached[1]
 
         options = {
-            "format": "best[ext=mp4][protocol^=http]/best[protocol^=http]/best",
+            # 프레임 처리에는 음성이 필요 없다. 영상/음성이 분리된 YouTube
+            # 영상에서도 열 수 있도록 영상 전용 MP4를 우선 선택한다.
+            "format": (
+                "bestvideo[ext=mp4][protocol^=http]/"
+                "bestvideo[protocol^=http]/bestvideo/"
+                "best[ext=mp4][protocol^=http]/best[protocol^=http]/best"
+            ),
             "noplaylist": True,
             "quiet": True,
             "no_warnings": True,
@@ -147,11 +153,22 @@ def resolve_video_source(
     youtube_url: str = "",
     webcam_index=None,
     video_file=None,
+    browser_session_id: str = "",
 ) -> VideoSource:
     """UI 입력을 OpenCV용 영상 소스로 변환한다."""
 
     if source_type == SOURCE_WEBCAM:
         try:
+            browser_source = webcams.parse_browser_webcam_value(
+                webcam_index,
+                browser_session_id,
+            )
+            if browser_source is not None:
+                return VideoSource(
+                    value=browser_source,
+                    source_type=source_type,
+                    pace_reads=False,
+                )
             index = webcams.coerce_webcam_index(webcam_index)
         except webcams.WebcamOpenError as exc:
             raise MediaSourceError(str(exc)) from exc
@@ -177,7 +194,10 @@ def open_video_capture(source: VideoSource) -> Iterator[cv2.VideoCapture]:
 
     if source.source_type == SOURCE_WEBCAM:
         try:
-            capture = webcams.open_webcam(source.value)
+            if isinstance(source.value, webcams.BrowserWebcamSource):
+                capture = webcams.open_browser_webcam(source.value)
+            else:
+                capture = webcams.open_webcam(source.value)
         except webcams.WebcamOpenError as exc:
             raise MediaSourceError(str(exc)) from exc
     else:
@@ -196,3 +216,18 @@ def capture_fps(capture: cv2.VideoCapture, fallback: float = 30.0) -> float:
 
     fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
     return fps if fps >= 1.0 else fallback
+
+
+def video_frames(capture, stop_event, pace_reads: bool = False):
+    """파일/YouTube는 재생 FPS로 읽고, 대기 중에도 중지 요청을 처리한다."""
+    interval = 1.0 / capture_fps(capture) if pace_reads else 0.0
+    next_read_at = time.perf_counter()
+    while not stop_event.is_set():
+        if pace_reads and stop_event.wait(max(0.0, next_read_at - time.perf_counter())):
+            return
+        ok, frame = capture.read()
+        if not ok:
+            return
+        if pace_reads:
+            next_read_at = max(next_read_at + interval, time.perf_counter())
+        yield frame

@@ -45,6 +45,132 @@ def _write_dataset(
 
 
 class DatasetImporterTests(unittest.TestCase):
+    def test_trainer_uses_stable_data_loading_options(self):
+        self.assertEqual(trainer._data_loading_options("mps"), (0, False))
+        self.assertEqual(trainer._data_loading_options("cpu"), (0, False))
+        self.assertEqual(trainer._data_loading_options("auto"), (0, False))
+
+    def test_training_metrics_are_restored_from_results_csv(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = Path(directory)
+            (run_dir / "results.csv").write_text(
+                "epoch,time,train/box_loss,train/cls_loss,train/dfl_loss,"
+                "val/box_loss,val/cls_loss,val/dfl_loss,metrics/precision(B),"
+                "metrics/recall(B),metrics/mAP50(B),metrics/mAP50-95(B)\n"
+                "2,12.5,1.5,0.9,1.1,1.7,1.0,1.2,0.7,0.6,0.5,0.3\n"
+                "3,19.0,1.25,0.75,0.95,1.4,0.8,1.0,0.8,0.7,0.6,0.4\n",
+                encoding="utf-8",
+            )
+
+            history = trainer._metrics_history_from_results(str(run_dir))
+            metrics = trainer._metrics_from_results(str(run_dir))
+
+            self.assertEqual(len(history), 2)
+            self.assertEqual(history[0]["epoch"], 2)
+            self.assertEqual(history[0]["time"], 12.5)
+            self.assertEqual(history[1]["val_box_loss"], 1.4)
+            self.assertEqual(metrics["epoch"], 3)
+            self.assertEqual(metrics["precision"], 0.8)
+            self.assertEqual(metrics["map50_95"], 0.4)
+
+    def test_parse_roboflow_project_and_version_urls(self):
+        self.assertEqual(
+            dataset_importer.parse_roboflow_universe_url(
+                "https://universe.roboflow.com/example/team-project"
+            ),
+            ("example", "team-project", None),
+        )
+        self.assertEqual(
+            dataset_importer.parse_roboflow_universe_url(
+                "https://universe.roboflow.com/example/team-project/dataset/7"
+            ),
+            ("example", "team-project", 7),
+        )
+
+    def test_parse_roboflow_url_rejects_other_hosts(self):
+        with self.assertRaisesRegex(
+            dataset_importer.DatasetImportError,
+            "universe.roboflow.com",
+        ):
+            dataset_importer.parse_roboflow_universe_url(
+                "https://example.com/workspace/project"
+            )
+
+    def test_roboflow_project_url_downloads_latest_and_registers(self):
+        class FakeDownload:
+            def __init__(self, location):
+                self.location = location
+
+        class FakeVersion:
+            def __init__(self, number):
+                self.version = str(number)
+
+            def download(self, model_format, location, overwrite=False):
+                self.model_format = model_format
+                self.overwrite = overwrite
+                _write_dataset(Path(location))
+                return FakeDownload(location)
+
+        class FakeProject:
+            def __init__(self):
+                self.items = [FakeVersion(1), FakeVersion(4), FakeVersion(2)]
+
+            def versions(self):
+                return self.items
+
+            def version(self, number):
+                return next(item for item in self.items if int(item.version) == number)
+
+        with tempfile.TemporaryDirectory() as directory:
+            project = FakeProject()
+            with mock.patch.object(
+                dataset_importer,
+                "_roboflow_project",
+                return_value=project,
+            ):
+                records, added, version = dataset_importer.download_roboflow_universe(
+                    "https://universe.roboflow.com/example/safety-cones",
+                    download_root=Path(directory),
+                    api_key="secret",
+                )
+
+            self.assertEqual(version, 4)
+            self.assertEqual(len(records), 1)
+            self.assertEqual(len(added), 1)
+            self.assertIn("v4", added[0]["source"])
+            self.assertTrue(Path(added[0]["yaml"]).is_file())
+
+    def test_downloaded_roboflow_datasets_are_listed_and_registered_on_selection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "roboflow"
+            yaml_path = _write_dataset(root / "workspace-project-v3-yolo26")
+            with mock.patch.object(dataset_importer, "ROBOFLOW_DATASETS_DIR", root):
+                downloaded = dataset_importer.list_downloaded_roboflow()
+                records, record = dataset_importer.register_downloaded_roboflow(
+                    downloaded[0]["yaml"]
+                )
+
+            self.assertEqual(len(downloaded), 1)
+            self.assertEqual(Path(downloaded[0]["yaml"]), yaml_path.resolve())
+            self.assertEqual(len(records), 1)
+            self.assertEqual(record["classes"], ["cone"])
+            self.assertIn("Roboflow 다운로드", record["source"])
+
+    def test_downloaded_roboflow_registration_rejects_paths_outside_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            outside = _write_dataset(root / "outside")
+            with mock.patch.object(
+                dataset_importer,
+                "ROBOFLOW_DATASETS_DIR",
+                root / "roboflow",
+            ):
+                with self.assertRaisesRegex(
+                    dataset_importer.DatasetImportError,
+                    "다운로드 폴더",
+                ):
+                    dataset_importer.register_downloaded_roboflow(str(outside))
+
     def test_validate_roboflow_style_dataset(self):
         with tempfile.TemporaryDirectory() as directory:
             yaml_path = _write_dataset(Path(directory) / "안전 라바콘")
@@ -239,16 +365,29 @@ class DatasetImporterTests(unittest.TestCase):
             self.assertFalse((root / "outside.txt").exists())
 
     def test_trainer_rejects_an_explicit_empty_selection(self):
-        outputs = list(
-            trainer.train(
-                1,
-                320,
-                1,
-                0.01,
-                "cpu",
-                dataset_yamls=[],
-            )
-        )
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            with (
+                mock.patch.object(trainer, "_runtime", {"status": "idle"}),
+                mock.patch.object(trainer, "_RUNTIME_DIR", runtime),
+                mock.patch.object(trainer, "_STATE_PATH", runtime / "state.json"),
+                mock.patch.object(trainer, "_LOG_PATH", runtime / "train.log"),
+            ):
+                outputs = list(
+                    trainer.train(
+                        1,
+                        320,
+                        1,
+                        10,
+                        "cpu",
+                        dataset_yamls=[],
+                    )
+                )
+
+                snapshot = trainer.training_snapshot()
+
+            self.assertEqual(snapshot["status"], "error")
+            self.assertFalse(snapshot["active"])
 
         self.assertEqual(len(outputs), 2)
         self.assertIn("통합 준비", outputs[0])

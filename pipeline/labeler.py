@@ -3,6 +3,8 @@ import cv2
 import numpy as np
 from pathlib import Path
 
+from pipeline import source_groups, data_store
+
 FRAMES_DIR = Path("dataset/raw_frames")
 LABELS_DIR = Path("dataset/labels")
 
@@ -30,6 +32,26 @@ def _get_predictor(conf: float):
 
 def stop():
     _stop_event.set()
+
+
+def source_choices() -> list[tuple[str, str]]:
+    """현재 추출 프레임의 소스 그룹 선택지를 반환한다."""
+
+    groups = source_groups.group_frames(list(FRAMES_DIR.glob("frame_*.jpg")))
+    return [(f"{key} — 전체 {len(frames)}장 · 미처리 {sum(not (LABELS_DIR / (f.stem + '.txt')).exists() for f in frames)}장", key)
+            for key, frames in groups.items()]
+
+
+def pending_sources():
+    return sorted({source_groups.source_id_from_path(f) for f in FRAMES_DIR.glob("frame_*.jpg")
+                   if not (LABELS_DIR / (f.stem + ".txt")).exists()})
+
+
+def _frames_for_sources(selected_sources=None) -> list[Path]:
+    frames = list(FRAMES_DIR.glob("frame_*.jpg"))
+    if selected_sources is not None and not selected_sources:
+        return []
+    return source_groups.filter_frames(frames, selected_sources)
 
 
 def _mask_to_yolo_bbox(mask_u8: np.ndarray, img_w: int, img_h: int):
@@ -82,7 +104,12 @@ def _infer_and_overlay(predictor, frame_bgr: np.ndarray, prompts: list[str]):
     return rgb, label_lines, len(label_lines)
 
 
-def preview(prompts_str: str, conf: float, n_preview: int):
+def preview(
+    prompts_str: str,
+    conf: float,
+    n_preview: int,
+    selected_sources=None,
+):
     """미리보기 — 전체에서 균등 샘플링한 N장만 라벨 결과를 보여준다 (저장 안 함).
 
     Generator — yields (gallery_items, status_str)
@@ -95,9 +122,9 @@ def preview(prompts_str: str, conf: float, n_preview: int):
         yield [], "클래스 프롬프트를 입력하세요. (예: person, car)"
         return
 
-    frames = sorted(FRAMES_DIR.glob("frame_*.jpg"))
+    frames = _frames_for_sources(selected_sources)
     if not frames:
-        yield [], "추출된 프레임이 없습니다. 먼저 1단계에서 프레임을 추출하세요."
+        yield [], "선택한 소스에 추출된 프레임이 없습니다."
         return
 
     n = max(1, int(n_preview))
@@ -134,13 +161,13 @@ def preview(prompts_str: str, conf: float, n_preview: int):
 
     yield gallery, (
         f"미리보기 완료 — {len(gallery)}장 샘플 · 총 {total_obj}개 객체. "
-        f"결과가 괜찮으면 「전체 라벨링 시작」을 누르세요. (아직 라벨은 저장되지 않았습니다)"
+        f"결과가 괜찮으면 「라벨링 시작」을 누르세요. (아직 라벨은 저장되지 않았습니다)"
     )
 
 
-def label(prompts_str: str, conf: float):
+def label(prompts_str: str, conf: float, selected_sources=None, mode="미처리만"):
     """
-    전체 라벨링 — 모든 프레임에 추론하고 라벨 파일을 저장한다.
+    선택 소스의 미처리 프레임을 처리하거나 명시적으로 재라벨링한다.
     Generator — yields (rgb_preview | None, status_str)
     prompts_str: "person, car, bicycle"  (쉼표 구분)
     """
@@ -151,17 +178,23 @@ def label(prompts_str: str, conf: float):
         yield None, "클래스 프롬프트를 입력하세요. (예: person, car)"
         return
 
-    frames = sorted(FRAMES_DIR.glob("frame_*.jpg"))
+    frames = _frames_for_sources(selected_sources)
     if not frames:
-        yield None, f"추출된 프레임이 없습니다. 먼저 1단계에서 프레임을 추출하세요."
+        yield None, "선택한 소스에 추출된 프레임이 없습니다."
         return
 
     LABELS_DIR.mkdir(parents=True, exist_ok=True)
 
-    # 기존 평면 라벨 삭제 — 이전 소스의 오라벨이 새 이미지에 붙는 것 방지
-    # (train/val 하위 폴더는 glob("*.txt")에 걸리지 않아 보존됨)
-    for old in LABELS_DIR.glob("*.txt"):
-        old.unlink()
+    if mode == "미처리만":
+        frames = [f for f in frames if not (LABELS_DIR / (f.stem + ".txt")).exists()]
+    if not frames:
+        yield None, "선택한 소스의 라벨링이 이미 완료되었습니다."
+        return
+    try:
+        mapping = data_store.map_prompts(LABELS_DIR.parent, prompts)
+    except (ValueError, OSError) as exc:
+        yield None, str(exc)
+        return
 
     yield None, "SAM3 모델 로딩 중..."
 
@@ -172,6 +205,9 @@ def label(prompts_str: str, conf: float):
         return
 
     total = len(frames)
+    selected_group_count = len(
+        {source_groups.source_id_from_path(frame) for frame in frames}
+    )
     done  = 0
 
     for frame_path in frames:
@@ -186,7 +222,11 @@ def label(prompts_str: str, conf: float):
 
         # 라벨 파일 저장 (마스크 없으면 빈 파일)
         label_path = LABELS_DIR / (frame_path.stem + ".txt")
-        label_path.write_text("\n".join(label_lines))
+        mapped_lines = []
+        for line in label_lines:
+            local_id, coords = line.split(" ", 1)
+            mapped_lines.append(f"{mapping[int(local_id)]} {coords}")
+        data_store.atomic_text(label_path, "\n".join(mapped_lines))
 
         done += 1
         yield rgb, f"{done} / {total}  |  {frame_path.name}  →  {n_obj}개 객체"
@@ -194,7 +234,10 @@ def label(prompts_str: str, conf: float):
     if _stop_event.is_set():
         yield None, f"중지됨 — {done}/{total} 완료  →  {LABELS_DIR.resolve()}"
     else:
-        yield None, f"라벨링 완료 — {done}장  →  {LABELS_DIR.resolve()}"
+        yield None, (
+            f"라벨링 완료 — {selected_group_count}개 소스, {done}장  "
+            f"→  {LABELS_DIR.resolve()}"
+        )
 
 
 def _class_color(cls_id: int) -> tuple:

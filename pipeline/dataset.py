@@ -1,14 +1,17 @@
 import shutil
-import random
+import tempfile
 import cv2
 import numpy as np
 import yaml
 from pathlib import Path
 
+from pipeline import source_groups, data_store
+
 FRAMES_DIR  = Path("dataset/raw_frames")
 LABELS_DIR  = Path("dataset/labels")
 IMAGES_DIR  = Path("dataset/images")
 YAML_PATH   = Path("dataset/dataset.yaml")
+SPLIT_MANIFEST_PATH = Path("dataset/split_manifest.json")
 
 _CLASS_COLORS = [
     (255, 100,   0),
@@ -50,6 +53,23 @@ def _has_label(stem: str) -> bool:
     return lp.exists() and lp.stat().st_size > 0
 
 
+def source_choices() -> list[tuple[str, str]]:
+    """소스별 전체/라벨 프레임 수를 validation 선택지로 반환한다."""
+
+    frames = list(FRAMES_DIR.glob("frame_*.jpg"))
+    groups = source_groups.group_frames(frames)
+    choices = []
+    for source_id, group in groups.items():
+        labeled = sum(_has_label(frame.stem) for frame in group)
+        choices.append(
+            (
+                f"{source_id} — 전체 {len(group)}장 · 라벨 있음 {labeled}장",
+                source_id,
+            )
+        )
+    return choices
+
+
 def _gallery_frames(filter_empty: bool) -> list[Path]:
     """갤러리에 표시되는 것과 '동일한 순서'의 프레임 경로 리스트.
 
@@ -74,7 +94,8 @@ def load_preview(prompts_str: str, filter_empty: bool):
         return [], "추출된 프레임이 없습니다."
 
     labeled = sum(1 for f in all_frames if _has_label(f.stem))
-    empty = len(all_frames) - labeled
+    pending = sum(not (LABELS_DIR / (f.stem + ".txt")).exists() for f in all_frames)
+    empty = len(all_frames) - labeled - pending
 
     gallery = []
     for fp in _gallery_frames(filter_empty):
@@ -89,7 +110,7 @@ def load_preview(prompts_str: str, filter_empty: bool):
         gallery.append((rgb, caption))
 
     stats = (
-        f"전체 {len(all_frames)}장  |  라벨 있음 {labeled}장  |  라벨 없음 {empty}장"
+        f"전체 {len(all_frames)}장  |  라벨 있음 {labeled}장  |  배경 {empty}장  |  미처리 {pending}장"
         + ("  (빈 프레임 숨김)" if filter_empty else "")
     )
     return gallery, stats
@@ -129,35 +150,17 @@ def _count_class_ids() -> dict[int, int]:
 
 
 def scan_classes(label_prompts: str = "") -> list[dict]:
-    """labels/ 를 스캔해 클래스 목록을 [{id, name, count}] 형태로 반환.
-
-    count 는 해당 클래스가 들어있는 프레임(이미지) 수.
-
-    이름 우선순위 (최신 라벨링 결과를 항상 우선):
-      1) Tab 2 오토라벨링 프롬프트(label_prompts) — SAM3 프롬프트 순서 = 클래스 ID
-      2) 기존 dataset.yaml 의 names
-      3) class_{id}
-
-    Tab 3 에서 직접 편집한 이름의 보존은 호출부(app.py)에서 "Tab 2 프롬프트가
-    바뀌지 않았으면 재스캔하지 않음"으로 처리한다. (재라벨링 시 새 이름 반영)
-    """
+    """프롬프트 순서가 아닌 영구 클래스 ID 순서로 편집기를 구성한다."""
     counts = _count_class_ids()
-    if not counts:
-        return []
+    entries = data_store.classes(LABELS_DIR.parent)["classes"]
+    return [{"id": i, "name": entry["name"], "count": counts.get(i, 0)}
+            for i, entry in enumerate(entries)]
 
-    lab = [p.strip() for p in label_prompts.split(",") if p.strip()]
-    yaml_names = _read_yaml_names()
 
-    classes = []
-    for cid in sorted(counts):
-        if cid < len(lab):
-            name = lab[cid]
-        elif cid in yaml_names:
-            name = yaml_names[cid]
-        else:
-            name = f"class_{cid}"
-        classes.append({"id": cid, "name": name, "count": counts[cid]})
-    return classes
+def save_class_names(names):
+    names = [(name or "").strip() for name in names]
+    data_store.rename_classes(LABELS_DIR.parent, names)
+    return ", ".join(names)
 
 
 def select_frame(prompts_str: str, filter_empty: bool, evt):
@@ -207,7 +210,31 @@ def delete_frame(frame_stem: str, prompts_str: str, filter_empty: bool):
     return gallery, stats, None, "", msg
 
 
-def build_dataset(prompts_str: str, val_ratio: float, filter_empty: bool):
+def _automatic_val_sources(
+    groups: dict[str, list[Path]],
+    val_ratio: float,
+) -> set[str]:
+    """프레임 수가 목표 비율에 가까워지도록 작은 소스부터 val에 배정한다."""
+
+    target = max(1, round(sum(map(len, groups.values())) * val_ratio))
+    ordered = sorted(groups, key=lambda source_id: (len(groups[source_id]), source_id))
+    selected: set[str] = set()
+    selected_count = 0
+    for source_id in ordered:
+        if len(selected) >= len(ordered) - 1:
+            break
+        if not selected or selected_count < target:
+            selected.add(source_id)
+            selected_count += len(groups[source_id])
+    return selected
+
+
+def build_dataset(
+    prompts_str: str,
+    val_ratio: float,
+    filter_empty: bool,
+    val_sources=None,
+):
     """
     train/val 분할 + dataset.yaml 생성.
     Yields status_str.
@@ -217,11 +244,19 @@ def build_dataset(prompts_str: str, val_ratio: float, filter_empty: bool):
         yield "클래스 프롬프트를 입력하세요."
         return
 
+    if (LABELS_DIR.parent / "classes.json").exists():
+        registry = data_store.classes(LABELS_DIR.parent)["classes"]
+        if any(not entry["resolved"] for entry in registry) or prompts != [entry["name"] for entry in registry]:
+            yield "클래스 목록이 변경되었습니다. 클래스 불러오기 후 다시 구성하세요."
+            return
+
     frames = sorted(FRAMES_DIR.glob("frame_*.jpg"))
     if not frames:
         yield "추출된 프레임이 없습니다."
         return
 
+    # 미처리 프레임을 배경으로 학습하지 않는다.
+    frames = [f for f in frames if (LABELS_DIR / (f.stem + ".txt")).exists()]
     if filter_empty:
         frames = [f for f in frames if
                   (LABELS_DIR / (f.stem + ".txt")).exists() and
@@ -231,45 +266,138 @@ def build_dataset(prompts_str: str, val_ratio: float, filter_empty: bool):
         yield "라벨이 있는 프레임이 없습니다. 먼저 Tab 2에서 오토라벨링을 실행하세요."
         return
 
-    # 기존 분할 결과 삭제 — 누적/train·val 누수(같은 프레임이 양쪽에 섞임) 방지
-    for split_name in ("train", "val"):
-        for d in (IMAGES_DIR / split_name, Path("dataset/labels") / split_name):
-            if d.exists():
-                shutil.rmtree(d)
-    yield "기존 train/val 폴더 정리 완료"
+    groups = source_groups.group_frames(frames)
+    if len(groups) < 2:
+        only_source = next(iter(groups), "없음")
+        yield (
+            "소스 단위 분리에는 최소 2개 소스가 필요합니다. "
+            f"현재 소스: {only_source}. 1단계에서 URL 또는 촬영 세션을 추가하세요."
+        )
+        return
 
-    random.shuffle(frames)
-    split = max(1, int(len(frames) * (1 - val_ratio)))
-    train_frames = frames[:split]
-    val_frames   = frames[split:]
+    requested_val = {str(value) for value in (val_sources or []) if value}
+    unknown_sources = requested_val - groups.keys()
+    if unknown_sources:
+        yield "존재하지 않는 validation 소스: " + ", ".join(sorted(unknown_sources))
+        return
 
-    for split_name, split_frames in [("train", train_frames), ("val", val_frames)]:
-        img_dir = IMAGES_DIR / split_name
-        lbl_dir = Path("dataset/labels") / split_name
-        img_dir.mkdir(parents=True, exist_ok=True)
-        lbl_dir.mkdir(parents=True, exist_ok=True)
+    records = data_store.read_json(FRAMES_DIR.parent / "sources.json", {"sources": []})["sources"]
+    origins = {r["id"]: source_groups.source_origin(r) for r in records}
+    families = {}
+    for source_id in groups:
+        families.setdefault(origins.get(source_id, source_id), set()).add(source_id)
+    previous = data_store.read_json(SPLIT_MANIFEST_PATH, {})
+    if requested_val:
+        selected_val = set(requested_val)
+    elif previous:
+        selected_val = set(previous.get("val_sources", [])) & groups.keys()
+        previous_train = set(previous.get("train_sources", []))
+        for family in families.values():
+            if family & selected_val and family & previous_train:
+                yield "같은 원본의 기존 train/val 배정이 충돌합니다. validation 소스를 직접 선택하세요."
+                return
+        new_groups = {k: v for k, v in groups.items() if k not in previous_train and k not in selected_val}
+        target = sum(map(len, groups.values())) * val_ratio
+        for key in sorted(new_groups, key=lambda k: (len(groups[k]), k)):
+            family = next(f for f in families.values() if key in f)
+            if family & previous_train:
+                continue
+            if sum(len(groups[k]) for k in selected_val) < target and selected_val | family != set(groups):
+                selected_val.update(family)
+    else:
+        family_groups = {min(f): [frame for k in f for frame in groups[k]] for f in families.values()}
+        if len(family_groups) < 2:
+            yield "소스 단위 분리에는 최소 2개 소스(서로 다른 원본)가 필요합니다."
+            return
+        selected_val = _automatic_val_sources(family_groups, val_ratio)
+    for family in families.values():
+        if family & selected_val:
+            selected_val.update(family)
+    if not selected_val or selected_val == set(groups):
+        yield "train과 validation에 각각 하나 이상의 소스를 배정해야 합니다."
+        return
 
-        for fp in split_frames:
-            shutil.copy(fp, img_dir / fp.name)
-            lp = LABELS_DIR / (fp.stem + ".txt")
-            if lp.exists():
-                shutil.copy(lp, lbl_dir / lp.name)
-            else:
-                (lbl_dir / (fp.stem + ".txt")).write_text("")
-
-        yield f"{split_name}: {len(split_frames)}장 복사 완료"
-
-    names_yaml = "\n".join(f"  {i}: {n}" for i, n in enumerate(prompts))
-    yaml_content = (
-        f"path: {Path('dataset').resolve().as_posix()}\n"
-        f"train: images/train\n"
-        f"val:   images/val\n"
-        f"\nnc: {len(prompts)}\n"
-        f"names:\n{names_yaml}\n"
+    train_sources = set(groups) - selected_val
+    train_frames = sorted(
+        frame for source_id in sorted(train_sources) for frame in groups[source_id]
     )
-    YAML_PATH.write_text(yaml_content, encoding="utf-8")
+    val_frames = sorted(
+        frame for source_id in sorted(selected_val) for frame in groups[source_id]
+    )
+
+    split_manifest = {
+        "version": 1,
+        "filter_empty": bool(filter_empty),
+        "classes": prompts,
+        "train_sources": sorted(train_sources),
+        "val_sources": sorted(selected_val),
+        "train_frames": len(train_frames),
+        "val_frames": len(val_frames),
+    }
+
+    # 완성된 임시 결과를 준비한 뒤 교체한다. 복사 실패/취소 시 기존 결과는 보존된다.
+    YAML_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".build-", dir=YAML_PATH.parent) as temporary:
+        staging = Path(temporary)
+        for split_name, split_frames in [("train", train_frames), ("val", val_frames)]:
+            img_dir = staging / "images" / split_name
+            lbl_dir = staging / "labels" / split_name
+            img_dir.mkdir(parents=True)
+            lbl_dir.mkdir(parents=True)
+            for fp in split_frames:
+                lp = LABELS_DIR / (fp.stem + ".txt")
+                for line in lp.read_text().splitlines():
+                    if line.strip():
+                        parts = line.split()
+                        if len(parts) != 5 or not 0 <= int(parts[0]) < len(prompts):
+                            raise ValueError(f"유효하지 않은 라벨: {lp.name}")
+                        coords = np.asarray([float(x) for x in parts[1:]])
+                        if not np.isfinite(coords).all() or (coords < 0).any() or (coords > 1).any():
+                            raise ValueError(f"유효하지 않은 좌표: {lp.name}")
+                shutil.copy(fp, img_dir / fp.name)
+                shutil.copy(lp, lbl_dir / lp.name)
+            yield f"{split_name}: {len(split_frames)}장 준비 완료"
+
+        yaml_content = yaml.safe_dump({"path": YAML_PATH.parent.resolve().as_posix(),
+            "train": "images/train", "val": "images/val", "nc": len(prompts),
+            "names": dict(enumerate(prompts))}, allow_unicode=True, sort_keys=False)
+        replaced = []
+        backups = []
+        old_yaml = YAML_PATH.read_text(encoding="utf-8") if YAML_PATH.exists() else None
+        try:
+            for category, destination in [("images", IMAGES_DIR), ("labels", LABELS_DIR)]:
+                destination.mkdir(parents=True, exist_ok=True)
+                for split in ("train", "val"):
+                    target = destination / split
+                    backup = staging / f"old-{category}-{split}"
+                    if target.exists():
+                        target.rename(backup)
+                        backups.append((target, backup))
+                    (staging / category / split).rename(target)
+                    replaced.append(target)
+            for split in ("train", "val"):
+                cache = LABELS_DIR / f"{split}.cache"
+                if cache.exists():
+                    backup = staging / f"old-{split}.cache"
+                    cache.rename(backup)
+                    backups.append((cache, backup))
+            data_store.atomic_text(YAML_PATH, yaml_content)
+            data_store.save_json(SPLIT_MANIFEST_PATH, split_manifest)
+        except BaseException:
+            for target in replaced:
+                shutil.rmtree(target)
+            for target, backup in backups:
+                backup.rename(target)
+            if old_yaml is not None:
+                data_store.atomic_text(YAML_PATH, old_yaml)
+            elif YAML_PATH.exists():
+                YAML_PATH.unlink()
+            raise
+
 
     yield (
         f"완료 — train {len(train_frames)}장 / val {len(val_frames)}장\n"
+        f"train 소스: {', '.join(sorted(train_sources))}\n"
+        f"val 소스: {', '.join(sorted(selected_val))}\n"
         f"dataset.yaml → {YAML_PATH.resolve()}"
     )

@@ -11,8 +11,10 @@ import tempfile
 import threading
 import uuid
 import zipfile
+from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
+from urllib.parse import unquote, urlparse
 
 import yaml
 
@@ -20,6 +22,7 @@ import yaml
 _ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DATASET_YAML = _ROOT / "dataset" / "dataset.yaml"
 EXTERNAL_DATASETS_DIR = _ROOT / "dataset" / "external"
+ROBOFLOW_DATASETS_DIR = EXTERNAL_DATASETS_DIR / "roboflow"
 COMBINED_DATASETS_DIR = _ROOT / "dataset" / ".combined"
 
 _IMAGE_SUFFIXES = {
@@ -39,10 +42,151 @@ _MAX_ARCHIVE_BYTES = 100 * 1024**3
 _EXTRACT_LOCK = threading.Lock()
 _STAGE_LOCK = threading.Lock()
 _STAGING_SCHEMA_VERSION = 1
+_ROBOFLOW_SLUG_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 class DatasetImportError(ValueError):
     """사용자에게 표시할 수 있는 외부 데이터셋 오류."""
+
+
+def parse_roboflow_universe_url(url: str) -> tuple[str, str, int | None]:
+    """Universe 프로젝트 URL에서 workspace, project, 선택 버전을 추출한다."""
+    raw_url = str(url or "").strip()
+    if not raw_url:
+        raise DatasetImportError("Roboflow Universe URL을 입력하세요.")
+    if "://" not in raw_url:
+        raw_url = f"https://{raw_url}"
+
+    parsed = urlparse(raw_url)
+    if parsed.scheme.casefold() not in {"http", "https"}:
+        raise DatasetImportError("Roboflow Universe URL은 HTTP(S) 주소여야 합니다.")
+    if (parsed.hostname or "").casefold() != "universe.roboflow.com":
+        raise DatasetImportError(
+            "universe.roboflow.com 프로젝트 URL만 사용할 수 있습니다."
+        )
+
+    parts = [unquote(part) for part in parsed.path.split("/") if part]
+    if len(parts) < 2:
+        raise DatasetImportError(
+            "URL에 workspace와 project가 필요합니다. "
+            "예: https://universe.roboflow.com/workspace/project"
+        )
+    workspace, project = parts[:2]
+    if not _ROBOFLOW_SLUG_RE.fullmatch(workspace) or not _ROBOFLOW_SLUG_RE.fullmatch(project):
+        raise DatasetImportError("Roboflow workspace/project 형식이 올바르지 않습니다.")
+
+    version: int | None = None
+    if len(parts) >= 4 and parts[2].casefold() == "dataset":
+        try:
+            version = int(parts[3])
+        except ValueError as exc:
+            raise DatasetImportError("Roboflow 데이터셋 버전은 정수여야 합니다.") from exc
+        if version <= 0:
+            raise DatasetImportError("Roboflow 데이터셋 버전은 1 이상이어야 합니다.")
+    return workspace, project, version
+
+
+def _roboflow_project(api_key: str, workspace: str, project: str):
+    try:
+        from roboflow import Roboflow
+    except ImportError as exc:
+        raise DatasetImportError(
+            "roboflow 패키지가 설치되지 않았습니다. requirements.txt를 설치하세요."
+        ) from exc
+    return Roboflow(api_key=api_key).workspace(workspace).project(project)
+
+
+def _roboflow_version(project: Any, requested: int | None) -> tuple[Any, int]:
+    if requested is not None:
+        return project.version(requested), requested
+
+    versions = project.versions()
+    numbered = []
+    for version in versions:
+        try:
+            numbered.append((int(version.version), version))
+        except (AttributeError, TypeError, ValueError):
+            continue
+    if not numbered:
+        raise DatasetImportError("다운로드 가능한 Roboflow 데이터셋 버전이 없습니다.")
+    version_number, version = max(numbered, key=lambda item: item[0])
+    return version, version_number
+
+
+def download_roboflow_universe(
+    url: str,
+    records: list[dict[str, Any]] | None = None,
+    *,
+    download_root: Path | None = None,
+    api_key: str | None = None,
+    model_format: str = "yolo26",
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
+    """Universe 데이터셋을 내려받아 검사하고 기존 레지스트리에 합친다."""
+    workspace, project_slug, requested_version = parse_roboflow_universe_url(url)
+    secret = str(api_key or os.getenv("ROBOFLOW_API_KEY", "")).strip()
+    if not secret:
+        raise DatasetImportError(
+            ".env 또는 환경변수에 ROBOFLOW_API_KEY를 등록하세요."
+        )
+
+    try:
+        project = _roboflow_project(secret, workspace, project_slug)
+        version, version_number = _roboflow_version(project, requested_version)
+    except DatasetImportError:
+        raise
+    except Exception as exc:
+        message = str(exc).replace(secret, "***")
+        raise DatasetImportError(f"Roboflow 프로젝트 조회 실패: {message}") from exc
+
+    root = (download_root or ROBOFLOW_DATASETS_DIR).resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    base_name = f"{workspace}-{project_slug}-v{version_number}-{model_format}"
+    destination = root / base_name
+
+    # 완전히 내려받은 동일 버전은 다시 받지 않는다. 불완전한 동명 폴더가 있으면
+    # 보존한 채 새 경로를 사용해 사용자 파일을 덮어쓰지 않는다.
+    existing_yamls = discover_dataset_yamls(destination) if destination.is_dir() else []
+    if not existing_yamls and destination.exists():
+        destination = root / f"{base_name}-{uuid.uuid4().hex[:8]}"
+
+    if not existing_yamls:
+        try:
+            downloaded = version.download(
+                model_format,
+                location=str(destination),
+                overwrite=False,
+            )
+            downloaded_location = Path(
+                getattr(downloaded, "location", destination)
+            ).resolve()
+        except Exception as exc:
+            message = str(exc).replace(secret, "***")
+            raise DatasetImportError(f"Roboflow 데이터셋 다운로드 실패: {message}") from exc
+        yaml_paths = discover_dataset_yamls(downloaded_location)
+    else:
+        yaml_paths = existing_yamls
+
+    if not yaml_paths:
+        raise DatasetImportError("다운로드 결과에서 data.yaml을 찾지 못했습니다.")
+
+    added: list[dict[str, Any]] = []
+    errors: list[str] = []
+    for yaml_path in yaml_paths:
+        try:
+            record = validate_dataset(yaml_path)
+            record["source"] = (
+                f"Roboflow Universe · {workspace}/{project_slug} "
+                f"v{version_number} · {model_format}"
+            )
+            added.append(record)
+        except DatasetImportError as exc:
+            errors.append(f"{yaml_path.name}: {exc}")
+
+    if not added:
+        detail = "\n".join(f"- {error}" for error in errors)
+        raise DatasetImportError(f"다운로드한 데이터셋 검증에 실패했습니다.\n{detail}")
+    added = _merge_records([], added)
+    return _merge_records(records, added), added, version_number
 
 
 def _natural_key(value: str) -> list[str | int]:
@@ -363,6 +507,71 @@ def discover_dataset_yamls(folder: str | os.PathLike[str]) -> list[Path]:
             "폴더에서 data.yaml 또는 dataset.yaml을 찾을 수 없습니다."
         )
     return unique
+
+
+def list_downloaded_roboflow() -> list[dict[str, str]]:
+    """이미 내려받은 Roboflow 데이터셋을 검증 없이 빠르게 나열한다.
+
+    실제 데이터셋 검증은 사용자가 항목을 선택해 등록할 때 수행한다. 다운로드가
+    끝난 폴더만 노출하며, 불완전한 폴더나 YAML이 없는 폴더는 목록에서 제외한다.
+    """
+    root = ROBOFLOW_DATASETS_DIR.resolve()
+    if not root.is_dir():
+        return []
+
+    items: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for folder in sorted(
+        (path for path in root.iterdir() if path.is_dir()),
+        key=lambda path: _natural_key(path.name),
+    ):
+        if not folder.resolve().is_relative_to(root):
+            continue
+        try:
+            yaml_paths = discover_dataset_yamls(folder)
+        except DatasetImportError:
+            continue
+        for yaml_path in yaml_paths:
+            resolved_yaml = yaml_path.resolve()
+            if not resolved_yaml.is_relative_to(root):
+                continue
+            key = str(resolved_yaml).casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            modified = datetime.fromtimestamp(yaml_path.stat().st_mtime).strftime(
+                "%Y-%m-%d %H:%M"
+            )
+            relative = resolved_yaml.relative_to(root)
+            items.append(
+                {
+                    "label": f"{folder.name} · {modified}",
+                    "yaml": str(resolved_yaml),
+                    "relative": relative.as_posix(),
+                }
+            )
+    return items
+
+
+def register_downloaded_roboflow(
+    yaml_file: str,
+    records: list[dict[str, Any]] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """로컬 Roboflow 다운로드 목록에서 선택한 YAML을 검사해 등록한다."""
+    raw_path = str(yaml_file or "").strip()
+    if not raw_path:
+        raise DatasetImportError("등록할 Roboflow 데이터셋을 선택하세요.")
+
+    yaml_path = Path(raw_path).resolve()
+    root = ROBOFLOW_DATASETS_DIR.resolve()
+    if not yaml_path.is_relative_to(root) or yaml_path.name not in _YAML_NAMES:
+        raise DatasetImportError("Roboflow 다운로드 폴더의 데이터셋만 등록할 수 있습니다.")
+    if not yaml_path.is_file():
+        raise DatasetImportError(f"데이터셋 YAML을 찾을 수 없습니다: {yaml_path}")
+
+    record = validate_dataset(yaml_path)
+    record["source"] = f"Roboflow 다운로드 · {yaml_path.parent.name}"
+    return _merge_records(records, [record]), record
 
 
 def _merge_records(

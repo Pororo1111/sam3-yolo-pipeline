@@ -1,7 +1,7 @@
 """모델 가중치 확인 및 자동 다운로드 헬퍼.
 
 앱 시작 시 `models/` 폴더에 필요한 가중치가 없으면 ultralytics 에셋에서
-자동으로 내려받는다. (현재는 학습용 베이스 모델 yolo26n.pt 대상)
+자동으로 내려받는다. (현재는 학습용 베이스 모델 yolo26m.pt 대상)
 """
 
 import shutil
@@ -13,10 +13,10 @@ MODELS_DIR = _ROOT / "models"
 RUNS_DIR = _ROOT / "runs" / "detect"
 
 # (파일명, ultralytics 에셋에서 자동 다운로드 가능 여부)
-_AUTO_DOWNLOAD = ["yolo26n.pt"]
+_AUTO_DOWNLOAD = ["yolo26m.pt"]
 
 
-def ensure_yolo_model(name: str = "yolo26n.pt") -> Path:
+def ensure_yolo_model(name: str = "yolo26m.pt") -> Path:
     """`models/<name>` 이 없으면 ultralytics 에셋에서 내려받아 배치하고 경로 반환.
 
     이미 존재하면 그대로 경로만 반환한다.
